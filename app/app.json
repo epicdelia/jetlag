@@ -1,18 +1,21 @@
 {
   "expo": {
-    "name": "Shift",
-    "slug": "shift-jetlag",
+    "name": "Shift: Jet Lag",
+    "slug": "shift",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "shiftjetlag",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon",
-      "bundleIdentifier": "com.example.shiftjetlag",
-      "supportsTablet": true
+      "bundleIdentifier": "com.epicdelia.shift",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.epicdelia.shift",
       "adaptiveIcon": {
         "backgroundColor": "#0E1220",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -32,7 +35,8 @@
         {
           "backgroundColor": "#0E1220",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 200,
+          "resizeMode": "contain"
         }
       ],
       [
@@ -43,6 +47,7 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "description": "Shift builds a day-by-day light, sleep and caffeine plan to help your body clock adjust to a new time zone."
   }
 }

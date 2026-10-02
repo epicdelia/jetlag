@@ -46,3 +46,27 @@ export function dayLabel(day: DayPlan): string {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return `${head} · ${WEEKDAYS[dt.getUTCDay()]} ${d} ${MONTHS[m - 1]}`;
 }
+
+/**
+ * Group a day's windows (sorted by start, as DayPlan.windows are) so that same-kind windows
+ * that follow on without a gap form one group: e.g. avoid_light on the plane until landing
+ * followed by avoid_light on the ground. The engine keeps such pieces separate only when their
+ * wording differs (window shade vs sunglasses); the app can show each group as one row
+ * (first start → last end) with each piece's rationale. Every other window is its own group.
+ */
+export function groupContiguousWindows(windows: readonly AdviceWindow[]): AdviceWindow[][] {
+  const groups: AdviceWindow[][] = [];
+  const openByKind = new Map<string, AdviceWindow[]>();
+  for (const w of windows) {
+    const g = w.startUtc !== w.endUtc ? openByKind.get(w.kind) : undefined;
+    const last = g?.[g.length - 1];
+    if (g && last && last.endUtc === w.startUtc) {
+      g.push(w);
+      continue;
+    }
+    const fresh = [w];
+    groups.push(fresh);
+    if (w.startUtc !== w.endUtc) openByKind.set(w.kind, fresh);
+  }
+  return groups;
+}

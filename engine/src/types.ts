@@ -54,6 +54,12 @@ export interface TripInput {
    * adapting is worthwhile at all (very short stays → stay on home time).
    */
   stayDays?: number;
+  /**
+   * Optional (backward-compatible). Hours the traveller's body clock is AHEAD (+) of origin
+   * local time at the start of the plan; negative = behind. Default 0 (adapted to the origin).
+   * Used for return trips after a partial adaptation (see buildReturnInput). Range [-12, 12].
+   */
+  startingBodyClockOffsetHours?: number;
 }
 
 export type AdviceKind =

@@ -220,6 +220,43 @@ export function dateKeyPlusDays(dateKey: string, n: number): string {
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
 }
 
+/**
+ * Canonical spelling of an IANA zone typed by hand ("asia/kolkata" → "Asia/Kolkata"), so labels
+ * and trip names never show the typed casing. Uses the runtime's zone list when it has one, then
+ * Intl's own resolution when it differs only by case, then title case. `extra` adds known zones.
+ */
+export function canonicalZone(tz: string, extra: readonly string[] = []): string {
+  const want = tz.trim();
+  const lower = want.toLowerCase();
+  const supported = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+  let known: string[] = [];
+  try {
+    known = supported ? supported('timeZone') : [];
+  } catch {
+    known = [];
+  }
+  const hit = [...extra, ...known].find((z) => z.toLowerCase() === lower);
+  if (hit) return hit;
+  try {
+    const r = new Intl.DateTimeFormat('en-US', { timeZone: want }).resolvedOptions().timeZone;
+    if (r && r.toLowerCase() === lower) return r;
+  } catch {
+    // fall through
+  }
+  const parts = want.split('/');
+  const titled = parts
+    .map((seg) =>
+      parts.length === 1 && seg.length <= 3
+        ? seg.toUpperCase()
+        : seg
+            .split('_')
+            .map((w) => (w ? w[0]!.toUpperCase() + w.slice(1).toLowerCase() : w))
+            .join('_'),
+    )
+    .join('/');
+  return isValidTimeZone(titled) ? titled : want;
+}
+
 /** Device zone, falling back to UTC. */
 export function deviceTimeZone(): string {
   try {

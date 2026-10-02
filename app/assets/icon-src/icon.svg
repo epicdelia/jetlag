@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+  <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#0E1220"/>
+    <stop offset="0.42" stop-color="#2B3A7A"/>
+    <stop offset="0.78" stop-color="#C9789A"/>
+    <stop offset="1" stop-color="#F6B26B"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#FFE3A3" stop-opacity="0.55"/>
+    <stop offset="1" stop-color="#FFE3A3" stop-opacity="0"/>
+  </radialGradient>
+  <clipPath id="aboveHorizon"><rect x="0" y="0" width="1024" height="640"/></clipPath></defs>
+  <rect width="1024" height="1024" fill="url(#sky)"/>
+  
+  <g transform="translate(512 512) scale(1) translate(-512 -512)">
+    <circle cx="512" cy="640" r="300" fill="url(#glow)"/>
+    <!-- rising sun (half disc above the horizon) -->
+    <g clip-path="url(#aboveHorizon)">
+      <circle cx="512" cy="640" r="170" fill="#FFE3A3"/>
+    </g>
+    <!-- horizon -->
+    <rect x="232" y="660" width="560" height="22" rx="11" fill="#FFE3A3"/>
+    <!-- crescent moon, upper left -->
+    <mask id="moonCut"><rect width="1024" height="1024" fill="#fff"/><circle cx="410" cy="322" r="84" fill="#000"/></mask>
+    <circle cx="372" cy="346" r="96" fill="#E9ECFF" mask="url(#moonCut)"/>
+    <!-- two small stars -->
+    <circle cx="640" cy="300" r="12" fill="#E9ECFF"/>
+    <circle cx="720" cy="390" r="8" fill="#E9ECFF"/>
+  </g>
+</svg>

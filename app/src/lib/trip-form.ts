@@ -100,8 +100,8 @@ export function validateTrip(legs: LegDraft[], stayText: string, profile: Profil
     if (!l.toTz) e.to = 'Choose where this flight lands.';
     const dep = l.fromTz ? localToUtc(l.departDate, l.departTime, l.fromTz) : null;
     const arr = l.toTz ? localToUtc(l.arriveDate, l.arriveTime, l.toTz) : null;
-    if (dep && !dep.ok) e.depart = ERR[dep.error];
-    if (arr && !arr.ok) e.arrive = ERR[arr.error];
+    if (dep && !dep.ok) e.depart = !l.departTime.trim() ? 'Add the departure time from your ticket.' : ERR[dep.error];
+    if (arr && !arr.ok) e.arrive = !l.arriveTime.trim() ? 'Add the arrival time from your ticket.' : ERR[arr.error];
     if (dep?.ok && dep.note === 'ambiguous') notes.push(`Leg ${i + 1}: departure falls in a repeated hour (clocks go back); using the first occurrence.`);
     if (arr?.ok && arr.note === 'ambiguous') notes.push(`Leg ${i + 1}: arrival falls in a repeated hour (clocks go back); using the first occurrence.`);
     if (dep?.ok && arr?.ok) {
@@ -137,14 +137,23 @@ export function validateTrip(legs: LegDraft[], stayText: string, profile: Profil
   let stayDays: number | undefined;
   const st = stayText.trim();
   if (st) {
-    const n = Number(st);
-    if (!Number.isFinite(n) || n <= 0 || n > 365) stayError = 'Enter a number of days between 1 and 365, or leave blank.';
+    // Whole days only: Number() would also accept "2.5" and "1e2".
+    const n = /^\d{1,3}$/.test(st) ? Number(st) : NaN;
+    if (!Number.isFinite(n) || n < 1 || n > 365) stayError = 'Enter a whole number of days between 1 and 365, or leave blank.';
     else stayDays = n;
   }
 
   const ok = out.length === legs.length && legErrors.every((e) => Object.keys(e).length === 0) && !stayError;
   const prefs = ok ? prefsForNow(profile.prefs, out, now) : profile.prefs;
-  if (ok && profile.prefs.preAdapt) {
+  const departed = ok && Date.parse(out[0]!.departUtc) < now;
+  if (departed) {
+    const lastArrive = Date.parse(out[out.length - 1]!.arriveUtc);
+    notes.push(
+      lastArrive < now - 14 * 864e5
+        ? 'This trip is in the past. The plan is shown for reference only.'
+        : 'This flight has already left, so the plan starts on travel day and earlier advice is already behind you.',
+    );
+  } else if (ok && profile.prefs.preAdapt) {
     const want = profile.prefs.maxPreDays ?? PARAMS.MAX_PRE_DAYS;
     const got = prefs.preAdapt ? (prefs.maxPreDays ?? want) : 0;
     if (got < want) {

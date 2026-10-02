@@ -37,6 +37,8 @@ export interface Trip {
    * days already in the past are dropped), so "profile changed" compares against this.
    */
   profileAtSave?: Profile;
+  /** Set on a return trip: the id of the outbound trip it was planned from. */
+  returnOf?: string;
 }
 
 export const DEFAULT_PROFILE: Profile = {

@@ -1,6 +1,6 @@
 import { View } from 'react-native';
 
-import { MELATONIN_NOTE } from '@/components/profile-form';
+import { MELATONIN_NOTE } from '@/constants/copy';
 import { Banner, Card, Screen, Section, T } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 
@@ -90,7 +90,9 @@ export default function About() {
             are conservative design choices where the evidence doesn't give an exact number.
           </Bullet>
           <Bullet>
-            Return trips, polar daylight and very long multi-stop itineraries are not modelled separately yet.
+            Return trips start from an estimate of where your body clock is when you fly home, assuming you followed
+            the outbound plan. Chained trips (one destination after another), polar daylight and very long multi-stop
+            itineraries are not modelled yet.
           </Bullet>
           <Bullet>
             Safety first: never drive, operate machinery or make critical decisions while drowsy because a plan says to

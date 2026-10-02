@@ -17,11 +17,14 @@ engine/   Pure TypeScript circadian engine. No runtime dependencies. Tested with
   src/journey.ts    Where the traveller is at an instant, and sleep placement around flights.
   src/time.ts       IANA time-zone arithmetic (DST gaps and overlaps, :30/:45 zones) built on Intl.
   src/rationale.ts  The plain-language sentences and warnings.
-  test/             Scenario tests (SCIENCE.md §13), property invariants over about 290 itineraries,
-                    edge cases and review regressions.
+  test/             Scenario tests (SCIENCE.md §13), property invariants over about 410 itineraries,
+                    edge cases and review regressions (round3.test.ts: awake spans, return-trip
+                    overlap, arrival day, stay cut-off, nap timing, daylight wording, bucketing).
 app/      Expo (SDK 57) React Native app. Expo Router, iOS-first, also runs on the web for testing.
-  src/app/          Screens: onboarding, Today, Trips, Settings, New trip, Plan, About.
+  src/app/          Screens: onboarding, Today, Trips, Settings, New/Edit/Return trip, Plan, About.
   src/lib/          Trip form → engine input (local wall-clock → UTC), storage, local notifications.
+  scripts/          generate-icons.mjs (app icon, adaptive icon, splash, favicon from SVG).
+  eas.json          EAS Build profiles (development, preview, production).
 docs/     SCIENCE.md (the model spec with citations, parameters, tests and limitations), screenshots.
 ```
 
@@ -30,8 +33,10 @@ docs/     SCIENCE.md (the model spec with citations, parameters, tests and limit
 1. **Phase estimate.** The engine estimates core body temperature minimum (Tmin) from usual bed and wake times plus chronotype. DLMO is taken as about 7 h before Tmin.
 2. **Strategy.** The engine works out the zone difference at arrival and chooses one of four strategies: advance (east), delay (west, or 10 h or more east, which is antidromic), stay on home time (stays of 2 days or less), or no plan (under 2 h).
 3. **Simulation.** Tmin is iterated in UTC with capped per-day rates, each taken from published data. Shifting starts up to 3 days before departure. The target is the habitual Tmin on the destination's *local* clock, so a DST change at the destination moves it.
-4. **Windows.** Light windows sit on the correct side of the light phase-response curve, with a 1 h safety margin around Tmin. Sleep follows the pre-flight shift, then destination nights, and in-flight sleep when it is realistic. Naps, caffeine and melatonin are added under conservative rules.
-5. **Output.** Windows are assigned to days. Every window carries the IANA zone the traveller is in at that moment, and the app displays it in that zone.
+4. **Windows.** Light windows sit on the correct side of the light phase-response curve, with a 1 h safety margin around Tmin. Sleep follows the pre-flight shift, then destination nights, and in-flight sleep when it is realistic: near the body-clock night, or after 8 h or more awake, never within 4 h of waking. A long leg that would leave the traveller awake more than 20 h gets in-flight sleep in the body-clock night, even when a destination-night sleep comes later in the flight. Naps (including an in-flight nap when a travel day would otherwise mean 18 h or more awake), caffeine and melatonin are added under conservative rules. Ground naps sit in the body-clock afternoon, never near Tmin.
+5. **Output.** Times are rounded to 5 minutes, touching windows with the same advice are merged, and windows are assigned to days (a sleep that starts after midnight is listed under the evening it belongs to). With a known stay, nothing is planned after the date the stay ends. Every window carries the IANA zone the traveller is in at that moment, and the app displays it in that zone. Light wording only promises daylight inside 08:00–16:30 local and never suggests sunglasses in the dark.
+
+Return trips: `buildReturnInput(outbound, returnLegs)` builds the journey home and sets the optional `TripInput.startingBodyClockOffsetHours` when the stay was too short to adapt fully (SCIENCE.md §8.1). `returnStart` (used by the app) also caps the return's pre-flight days so they never overlap the outbound plan: none while the outbound plan is still adapting the traveller, otherwise only the days after it has finished.
 
 The full specification, citations and parameter table are in [`docs/SCIENCE.md`](docs/SCIENCE.md).
 
@@ -57,21 +62,75 @@ npx tsc --noEmit
 npx expo start      # dev server; press i for the iOS simulator, w for web
 ```
 
-- **iOS on a phone:** install Expo Go, run `npx expo start`, then scan the QR code. Local notifications need a real device. For production-like behaviour (notification permissions, icons, no Expo Go shell), make a development build: `npx expo run:ios`, or with EAS, `eas build --profile development --platform ios`.
-- **Web (for testing):** `npx expo start --web`, or build a static bundle with `npx expo export --platform web` (output in `app/dist`). Reminders are disabled on the web.
+- **Web (for testing):** `npx expo start --web`, or build a static bundle with `npx expo export --platform web` (output in `app/dist`). Serve `app/dist` with any static server that falls back to `index.html` for unknown paths (the app's own not-found screen handles bad links). Reminders are disabled on the web, and dates and times are typed (`YYYY-MM-DD`, `HH:mm`) instead of using the native pickers.
+- **Browser QA:** the end-to-end checks drive that static build with Playwright and Chromium (390×844, `America/Toronto`, light and dark, with `page.clock` to move "now" through a trip). Screenshots from the last run are in `docs/screenshots` (`v1-*`, `v1-dark-*`).
 - The app imports the engine from source (`@jetlag/engine` → `../engine/src`). There is no separate build step.
+- Dependencies: the sandbox proxy blocks Expo's API, so `npx expo install` can fail. Take the SDK-57 version of a native module from `app/node_modules/expo/bundledNativeModules.json` and `npm install <pkg>@<version>` instead.
+- CI (`.github/workflows/ci.yml`) runs on Node 22: `npm ci` in both packages, engine tests and type check, app type check and a web export.
+
+### Run on an iPhone
+
+**Quick testing with Expo Go** (no Apple developer account needed):
+
+1. Install **Expo Go** from the App Store on the iPhone.
+2. On your computer: `cd app && npm install && npx expo start`. Keep the phone on the same Wi-Fi network (or run `npx expo start --tunnel`).
+3. Scan the QR code with the iPhone Camera app; it opens in Expo Go.
+
+Local notifications (the plan reminders) work in Expo Go. Remote/push features of `expo-notifications` are limited in Expo Go, but Shift does not use them. Expo Go shows its own icon and name rather than Shift's.
+
+**Development build** (Shift's own icon, name and bundle ID, closest to the App Store app):
+
+```sh
+npm install -g eas-cli
+cd app
+eas login
+eas init                                   # once: links the project to your Expo account
+eas device:create                          # once: register the iPhone for internal builds
+eas build --profile development --platform ios
+```
+
+Install the build from the link or QR code EAS prints, then run `npx expo start --dev-client` and open the project from the Shift dev app. `eas build --profile development-simulator --platform ios` builds for the iOS Simulator instead, and `npx expo run:ios` builds locally if you have Xcode. Build profiles live in `app/eas.json`:
+
+| Profile | Use |
+|---|---|
+| `development` | Dev client (`expo-dev-client`), internal distribution to registered devices. |
+| `development-simulator` | Same, for the iOS Simulator. |
+| `preview` | Release build, internal distribution to registered test devices. |
+| `production` | App Store build; the build number auto-increments. |
+
+**App Store submission** (high level):
+
+1. Join the Apple Developer Program and create the app in App Store Connect with bundle ID `com.epicdelia.shift` (name "Shift: Jet Lag").
+2. `eas build --profile production --platform ios` (EAS manages signing certificates and provisioning profiles).
+3. `eas submit --profile production --platform ios` uploads the build to App Store Connect. Test it in TestFlight.
+4. Fill in the listing: screenshots, description, a privacy policy URL, a support URL, the privacy nutrition label (all data stays on the device today) and the age rating. Keep the health-related wording inside general wellness (Guideline 1.4.1), with the "not medical advice" note.
+5. Submit for review. `ITSAppUsesNonExemptEncryption` is already set to `false` in `app.json`.
+
+### App identity
+
+- Name: **Shift: Jet Lag** (`expo.name`), slug `shift`, bundle ID and Android package `com.epicdelia.shift`.
+- Icon, Android adaptive icon (background, foreground, monochrome layers), splash mark and favicon are drawn from SVG in `app/scripts/generate-icons.mjs`: a night-to-day gradient with a setting moon and a rising sun. Run `npm run icons` in `app/` to regenerate the PNGs in `app/assets/images` (source SVGs are written to `app/assets/icon-src`). The iOS icon is written without an alpha channel, as the App Store requires.
+
+### Trips
+
+- **New trip**: native date and time pickers on iOS and Android, typed entry on the web. Times are entered as the ticket shows them, in each airport's local time. The app converts them to UTC with the zone's rules on that date (DST gaps and repeated hours are flagged). Changing the departure date moves the arrival date by the same number of days (on the web, once the typed date is complete). Stays are whole days (1–365). A trip whose flight has already left gets a note instead of the "too soon to adjust" note. A hand-typed IANA zone is stored in its canonical spelling.
+- **Edit trip** (plan screen): opens the form prefilled. Saving rebuilds the plan and reschedules reminders.
+- **Plan my return** (plan screen): opens New trip with the route reversed (destination → origin), dated from the outbound arrival plus the stay. The return plan starts from the body clock the outbound plan is expected to leave behind, using the engine's `returnStart` (SCIENCE.md §8.1), and adds pre-flight days only after the outbound plan has finished. The outbound plan stops where the return plan starts (plan screen, Today and reminders), with a note on the outbound plan. Editing the outbound trip later does not update an existing return plan. If the outbound trip is deleted, editing the return keeps the body-clock estimate saved with it.
+- **Today**: picks the plan day by time span, so the arrival date counts as the travel day, and shows the 24-hour strip for the clock you are on now. The body-clock line is measured against local time (and against destination time when they differ). When an outbound plan and its return would overlap, the return plan wins.
+- **Plan screen**: the travel day shows two strips when it runs past the departure date (departure date on the origin clock, arrival date on the destination clock). Plans with melatonin show the "talk to a clinician" note, as does Today.
+- **Settings**: sleep-time and preference edits are saved with Save or when you leave the screen. Out-of-range sleep times are discarded on leaving, so values passed while stepping through times never reach new trips.
 
 ## Honesty notes
 
 - **Not medical advice.** Shift gives general, behavioural guidance based on published circadian research: when to seek or avoid light, sleep timing and caffeine. It does not diagnose or treat anything. The app shows this note on onboarding, on Today, on every plan and in About. It also tells people never to drive or work drowsy because a plan says to stay awake.
-- **Melatonin is off by default.** Turning it on adds 0.5 mg timing for advance (eastward) plans only, described as "commonly used". The app shows a "talk to a clinician" note whenever it is enabled. Delay plans get no melatonin windows, because evidence for that use is weak.
+- **Melatonin is off by default.** Turning it on adds 0.5 mg timing for advance (eastward) plans only, described as "commonly used". The app shows a "talk to a clinician" note in Settings and About, and on every plan (and Today) that schedules a dose. Delay plans get no melatonin windows, because evidence for that use is weak.
 - **Limitations** (from SCIENCE.md §14):
   - **Not clinically validated.** The rules have not been tested against measured DLMO in travellers. Rates and windows come from lab studies, mostly of young, healthy adults.
   - **Phase estimate error.** A Tmin inferred from self-reported sleep is uncertain by about ±1–2 h. The 1 h margins reduce the risk of light on the wrong side, but cannot remove it.
   - **No light-dose model.** The engine says *when* to seek or avoid light, not how much the person actually got. There is no adherence feedback yet.
   - **Fixed rates.** Real shift rates vary by person and trip. Sleep loss, meals, exercise and age are ignored.
   - **Untested thresholds.** The antidromic threshold (10 h east) and several buffers (nap, caffeine, minimum shift, delay seek-light reach) are design choices, not empirical cut-offs.
-  - **Not modelled:** return trips, origin DST changes during pre-flight days, polar daylight, and the person's commitments.
+  - **Return trips** start from an estimate of the body clock the outbound plan leaves behind, assuming it was followed. **Not modelled:** chained trips (one destination after another), origin DST changes during pre-flight days, polar daylight, sunrise and sunset (daylight wording uses fixed local-clock bands), and the person's commitments.
   - Items marked † in SCIENCE.md were checked only against abstracts or secondary sources. Re-check them before making any public claims.
 
 ## Roadmap to a real product
@@ -86,20 +145,22 @@ npx expo start      # dev server; press i for the iOS simulator, w for web
    - Log actual light exposure (ambient-light sensor where available) and whether people followed the plan.
    - Replace the capped-linear model with an oscillator model that responds to partial adherence (Kronauer/Forger family) once there is data to validate it.
 3. **Return trips and chains.**
-   - Plan out and back as one itinerary: choose between adapting and staying on home time using the stay length and the return.
-   - Model a re-adaptation plan after the return.
+   - Done in v0: a return plan starts from the estimated body clock and never overlaps the outbound plan.
+   - Plan out and back as one itinerary: choose between adapting and staying on home time using the stay length and the return date together.
+   - Update an existing return plan when the outbound trip is edited.
    - Support chained multi-city trips without resetting to "fully adapted" in between.
 4. **App Store requirements.**
    - Privacy nutrition label: all data is on the device today, and HealthKit later would need purpose strings.
    - Write a privacy policy, a support URL and medical-disclaimer wording that meets Guideline 1.4.1 (health apps).
-   - Notification permission copy, accessibility review (VoiceOver labels already exist), real app icon and screenshots, and the bundle ID change from `com.example.*`.
+   - Notification permission copy, accessibility review (VoiceOver labels already exist) and App Store screenshots. The app icon and bundle ID (`com.epicdelia.shift`) are in place.
    - Add crash reporting and opt-in analytics, and sign in with Apple if accounts are added.
    - Plan for StoreKit if this becomes a subscription.
 5. **Product polish.**
    - Calendar import of flights (or a flight-number lookup).
    - Widgets and Live Activities for "right now" advice.
    - Day-by-day editing around commitments ("I have a meeting at 9").
-   - A sunrise and sunset model for daylight wording, and localization.
+   - A sunrise and sunset model for daylight wording (needs a latitude per city), and localization.
+   - Move the e2e browser checks into the repo and CI.
 6. **Wedge options** (pick one to lead):
    - **Frequent flyers with chained trips.** Consultants, flight crew-adjacent roles, sales. This is the strongest pain point and the case Timeshifter handles least well (back-to-back legs, short stays). It needs return-trip and chained-trip modelling (item 3).
    - **Wearable-driven.** "Your Oura/Apple Watch already knows your body clock." Personalised phase from real sleep data with adherence feedback. This differentiates on accuracy and needs item 2 plus validation.

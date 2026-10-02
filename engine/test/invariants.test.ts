@@ -84,6 +84,34 @@ function cases(): Case[] {
       });
     }
   });
+  // off-grid minutes everywhere (departures, durations, habitual sleep) to exercise 5-min rounding
+  const ODD_SLEEPS = [
+    { usualBedtime: '22:47', usualWake: '06:52', chronotype: 'intermediate' as const },
+    { usualBedtime: '00:13', usualWake: '07:58', chronotype: 'late' as const },
+  ];
+  let m = 0;
+  for (const a of ZONES.slice(0, 9)) {
+    for (const b of ZONES.slice(8)) {
+      if (a === b) continue;
+      m++;
+      const dep = ms('2026-11-12T13:07:00Z') + (m % 5) * 3 * HOUR + m * 60_000;
+      const arr = dep + (3 + ((m * 5) % 13)) * HOUR + 13 * 60_000;
+      const iso = (x: number) => new Date(x).toISOString();
+      out.push({
+        name: `odd ${a} → ${b} #${m}`,
+        input: trip([leg(a, b, iso(dep), iso(arr))], {
+          sleep: ODD_SLEEPS[m % 2],
+          prefs: { useMelatonin: m % 3 === 0, preAdapt: m % 4 !== 0 },
+        }),
+      });
+    }
+  }
+  // return trips / partial adaptation: a starting body-clock offset
+  const OFFSETS = [-6, -2.5, 3, 7.25];
+  out.filter((_, i) => i % 9 === 0).forEach((c, i) => {
+    const o = OFFSETS[i % OFFSETS.length]!;
+    out.push({ name: `${c.name} offset ${o}`, input: { ...c.input, startingBodyClockOffsetHours: o } });
+  });
   return out;
 }
 
@@ -144,14 +172,47 @@ function checkPlan(plan: Plan, input: TripInput) {
     for (let i = 0; i < K.length; i++) for (let j = i + 1; j < K.length; j++) expect(overlaps(K[i]!, K[j]!)).toBe(false);
   }
 
-  // light windows are at least 30 min; naps are 20 min, at most one per day
+  // every boundary is on the 5-minute grid (UTC and therefore every local clock in use)
+  for (const w of ws) {
+    expect(ms(w.startUtc) % (5 * 60_000), `${w.kind}@${w.startUtc}`).toBe(0);
+    expect(ms(w.endUtc) % (5 * 60_000), `${w.kind}@${w.endUtc}`).toBe(0);
+    const f = formatWindowLocal(w);
+    expect(Number(f.startLocal.slice(3)) % 5).toBe(0);
+    expect(Number(f.endLocal.slice(3)) % 5).toBe(0);
+  }
+  // same-kind windows with the same tz and wording never touch (they would have been merged)
+  for (let i = 0; i < ws.length; i++) {
+    for (let j = 0; j < ws.length; j++) {
+      const a = ws[i]!;
+      const b = ws[j]!;
+      if (i === j || a.kind !== b.kind || a.kind === 'melatonin' || a.tz !== b.tz || a.rationale !== b.rationale) continue;
+      expect(a.endUtc === b.startUtc, `unmerged ${a.kind} ${a.startUtc}..${a.endUtc}..${b.endUtc}`).toBe(false);
+    }
+  }
+
+  // light windows are at least 30 min; ground naps are 20 min, in-flight naps 20–90 min and
+  // clear of the caffeine cut-off before the next sleep; at most one nap per day
   for (const w of ws.filter((x) => x.kind === 'seek_light' || x.kind === 'avoid_light')) {
     expect(ms(w.endUtc) - ms(w.startUtc)).toBeGreaterThanOrEqual(0.5 * HOUR);
   }
+  const flying = (t: number) => input.legs.some((l) => t >= ms(l.departUtc) && t < ms(l.arriveUtc));
   for (const d of plan.days) {
     const naps = d.windows.filter((w) => w.kind === 'nap');
-    expect(naps.length).toBeLessThanOrEqual(1);
-    for (const n of naps) expect(ms(n.endUtc) - ms(n.startUtc)).toBe(20 * 60_000);
+    // One nap per day; a multi-leg travel day may have one in-flight nap per leg instead.
+    const legsInDay = input.legs.filter((l) => naps.some((n) => ms(n.startUtc) >= ms(l.departUtc) && ms(n.startUtc) < ms(l.arriveUtc)));
+    expect(naps.length).toBeLessThanOrEqual(Math.max(1, legsInDay.length));
+    if (naps.length > 1) expect(naps.every((n) => flying(ms(n.startUtc)))).toBe(true);
+    for (const n of naps) {
+      const len = ms(n.endUtc) - ms(n.startUtc);
+      if (flying(ms(n.startUtc))) {
+        expect(flying(ms(n.endUtc) - 1)).toBe(true);
+        expect(len).toBeGreaterThanOrEqual(20 * 60_000);
+        expect(len).toBeLessThanOrEqual(90 * 60_000);
+        for (const c of windowsOf(plan, 'avoid_caffeine')) expect(overlaps(n, c), `nap@${n.startUtc}`).toBe(false);
+      } else {
+        expect(len).toBe(20 * 60_000);
+      }
+    }
   }
 
   // realistic sleep: ground sleep ≤ 12 h and never starts mid-afternoon on the local clock.
@@ -185,7 +246,8 @@ function checkPlan(plan: Plan, input: TripInput) {
       if (Math.abs(r) > PARAMS.ADAPTED_TOL) expect(Math.sign(r)).toBe(Math.sign(plan.plannedShiftHours));
     }
     expect(Math.abs(rem[0]!)).toBeLessThanOrEqual(Math.abs(plan.plannedShiftHours) + 0.05);
-    const horizonLimited = plan.warnings.some((w) => w.startsWith('Plan covers'));
+    // The plan stops at the horizon, or (with a known stay) at the end of the date the stay ends.
+    const horizonLimited = plan.warnings.some((w) => w.startsWith('Plan covers') || w.startsWith('Short stay'));
     if (!horizonLimited) {
       expect(Math.abs(rem[rem.length - 1]!)).toBeLessThanOrEqual(PARAMS.ADAPTED_TOL);
       // estimatedDaysToAdapt matches the post-departure days still above tolerance (± the travel day)
@@ -193,11 +255,15 @@ function checkPlan(plan: Plan, input: TripInput) {
       expect(plan.estimatedDaysToAdapt).toBeLessThanOrEqual(postDays.length);
     }
     expect(plan.strategy === 'advance').toBe(plan.plannedShiftHours > 0);
-    if (plan.strategy === 'delay' && plan.zoneDeltaHours > 0) {
+    if (plan.strategy === 'delay' && plan.zoneDeltaHours > 0 && !input.startingBodyClockOffsetHours) {
       expect(plan.zoneDeltaHours).toBeGreaterThanOrEqual(PARAMS.ANTIDROMIC_EAST_THRESHOLD);
     }
   } else if (plan.strategy === 'stay_on_home_time') {
-    for (const d of plan.days) expect(Math.abs(d.remainingShiftHours - plan.zoneDeltaHours)).toBeLessThan(0.051);
+    // remaining = zone delta minus any starting body-clock offset, normalised to (−12, 14]
+    let expected = plan.zoneDeltaHours - (input.startingBodyClockOffsetHours ?? 0);
+    while (expected > 14) expected -= 24;
+    while (expected <= -12) expected += 24;
+    for (const d of plan.days) expect(Math.abs(d.remainingShiftHours - expected)).toBeLessThan(0.051);
   }
 
   // preferences

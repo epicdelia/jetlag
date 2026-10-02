@@ -1,7 +1,7 @@
 # SCIENCE.md — Circadian model specification (v0)
 
 Status: specification for `engine/` to implement `buildPlan(input: TripInput): Plan` (see `engine/src/types.ts`).
-No change to `types.ts` is required by this spec.
+The only contract change is one optional, backward-compatible input field, `TripInput.startingBodyClockOffsetHours` (§8.1).
 
 Audience: the engine engineer (implement §11–§12 directly) and anyone reviewing the product's claims.
 
@@ -41,11 +41,11 @@ All references below were checked by web search on 2026-10-02 (authors, year, jo
 | CDCYellowBook | CDC Yellow Book, "Jet Lag Disorder" (Travel by Air & Sea chapter). cdc.gov/yellow-book/hcp/travel-air-sea/jet-lag-disorder.html | yes (search snippet)† |
 | Aschoff1975 | Aschoff J, Hoffmann K, Pohl H, Wever R. Re-entrainment of circadian rhythms after phase-shifts of the Zeitgeber. *Chronobiologia* 1975;2(1):23–78. | yes (citation) |
 | DaanLewy1984 | Daan S, Lewy AJ. Scheduled exposure to daylight: a potential strategy to reduce "jet lag" following transmeridian flight. *Psychopharmacol Bull* 1984;20(3):566–568. | yes (citation) |
-| Takahashi2002 | Takahashi T, Sasaki M, Itoh H, et al. Melatonin alleviates jet lag symptoms caused by an 11-hour eastward flight. *Psychiatry Clin Neurosci* 2002;56(3):301–302. | yes (citation; pages from memory†) |
+| Takahashi2002 | Takahashi T, Sasaki M, Itoh H, et al. Melatonin alleviates jet lag symptoms caused by an 11-hour eastward flight. *Psychiatry Clin Neurosci* 2002;56(3):301–302. | yes (citation; volume and pages re-checked by web search 2026-10-02) |
 | DiekmanBose2018 | Diekman CO, Bose A. Reentrainment of the circadian pacemaker during jet lag: East-west asymmetry and the effects of north-south travel. *J Theor Biol* 2018;437:261–285. | yes (citation) |
 | Dean2009 | Dean DA, Forger DB, Klerman EB. Taking the lag out of jet lag through model-based schedule design. *PLoS Comput Biol* 2009;5(6):e1000418. | yes |
 | Drake2013 | Drake C, Roehrs T, Shambroom J, Roth T. Caffeine effects on sleep taken 0, 3, or 6 hours before going to bed. *J Clin Sleep Med* 2013;9(11):1195–1200. PMC3805807 | yes (abstract) |
-| Gardiner2023 | Gardiner C, Weakley J, Burke LM, Roach GD, Sargent C, Maniar N, Townshend A, Halson SL. The effect of caffeine on subsequent sleep: a systematic review and meta-analysis. *Sleep Med Rev* 2023;69:101764. | yes (abstract; volume/article no.†) |
+| Gardiner2023 | Gardiner C, Weakley J, Burke LM, Roach GD, Sargent C, Maniar N, Townshend A, Halson SL. The effect of caffeine on subsequent sleep: a systematic review and meta-analysis. *Sleep Med Rev* 2023;69:101764. | yes (abstract; volume, article number, 24 studies and ~45 min re-checked 2026-10-02) |
 | Burke2015 | Burke TM, Markwald RR, McHill AW, Chinoy ED, Snider JA, Bessman SC, Jung CM, O'Neill JS, Wright KP Jr. Effects of caffeine on the human circadian clock in vivo and in vitro. *Sci Transl Med* 2015;7(305):305ra146. | yes |
 | BrooksLack2006 | Brooks A, Lack L. A brief afternoon nap following nocturnal sleep restriction: which nap duration is most recuperative? *Sleep* 2006;29(6):831–840. | yes (abstract) |
 | Rosekind1995 | Rosekind MR, Smith RM, Miller DL, et al. Alertness management: strategic naps in operational settings. *J Sleep Res* 1995;4(S2):62–66. | yes (citation) |
@@ -105,7 +105,10 @@ Rationale for the boundaries (**DESIGN CHOICE**, informed by the PRCs above):
 - The 4 h avoid window after Tmin for delays covers the early-morning advance region.
 - Delay seek light reaches back up to 8 h before Tmin (review fix). With a habitual bedtime about 5 h before Tmin, and pre-flight bedtimes moving later faster than the clock, `[t − 5, t − 1)` falls almost entirely inside planned sleep. The evening before bedtime is still in the light-PRC delay region (Khalsa2003 measured delays for light centred many hours before Tmin), so the engine keeps the **latest 4 h of waking time** in `[t − 8, t − 1)`.
 - Which event a window serves: for an advance, morning light after Tmin_i drives the step from event i. For a delay, evening light before Tmin_i drives the step that lands at event i, so delay windows are emitted while the *previous* event was still above tolerance.
-- Wording: seek-light windows whose midpoint falls outside 06:30–19:30 local say "bright indoor light or a light box" instead of "ideally daylight" (a plain clock check, no solar model).
+- Wording (review fix; a plain clock check, no solar model and no latitude). Every 15 minutes of the window is checked on the local clock where the traveller is:
+  - Only a seek-light window that lies entirely inside **08:00–16:30** (`DAYLIGHT_CORE_HOURS`, daylight even in winter at mid latitudes) says "ideally daylight".
+  - A window entirely outside **06:30–19:30** (`DAYLIGHT_HOURS`) is treated as dark. Seek light then says "bright indoor light or a light box", or on a plane "use the reading light or a bright screen" (no "open the window shade"). Avoid light then says "keep the lights dim and screens low", with no "wear sunglasses outside".
+  - Anything in between says "get daylight while it's light out, otherwise bright indoor light or a light box".
 
 Windows are clipped to waking time (sleep is already dark), and pieces shorter than 30 min are dropped.
 
@@ -186,7 +189,7 @@ Evidence:
 Engine rules:
 
 - `avoid_caffeine` = `[sleepStart − CAFFEINE_CUTOFF_H, sleepStart)` for each planned sleep (main and in-flight), clipped to waking time. `CAFFEINE_CUTOFF_H = 8`. This is a **DESIGN CHOICE**: Gardiner2023 rounded down; Drake2013 shows 6 h is not enough at higher doses.
-- `caffeine_ok` = waking time from the end of one sleep to `nextSleepStart − 8h`, when that is ≥ 1 h. Emit only on day 0 and on later days where `|remaining| ≥ 2`. Rationale: "If you need it, caffeine now can help with daytime sleepiness without disturbing tonight's sleep."
+- `caffeine_ok` = waking time from the end of one sleep to `nextSleepStart − 8h`, when that is ≥ 1 h. Emit only on day 0, on the **arrival day**, and on later days where `|remaining| ≥ 2`. The arrival day is the first day with at least `NAP_AFTER_ARRIVAL_H` of it left after landing: usually day 0, but day 1 after a date-line arrival two dates after departure (review fix: the arrival day after a red-eye was losing both its nap and its caffeine window). Rationale: "If you need it, caffeine now can help with daytime sleepiness without disturbing tonight's sleep."
 - Never emit `caffeine_ok` overlapping `avoid_caffeine`.
 
 ---
@@ -200,10 +203,30 @@ Evidence:
 
 Engine rules:
 
-- At most one `nap` window per day, 20 min long (`NAP_MIN = 20`), rationale "keep it short (10–20 min)".
-- Emit only on day 0 (after arrival) and on later days where `|remaining| ≥ 3`.
+- At most one `nap` window per day, 20 min long (`NAP_MIN = 20`), rationale "keep it short (10–20 min)". Exception: a multi-leg travel day can have one in-flight nap per leg (§7.1).
+- Emit only on day 0 and the arrival day (after landing; see §6 for the arrival day) and on later days where `|remaining| ≥ 3`.
 - Allowed region: waking time ∩ `[prevWake + 2h, nextSleepStart − NAP_BEFORE_BED_H)`, with `NAP_BEFORE_BED_H = 6`. **DESIGN CHOICE**: we found no verified study for an exact buffer; 6 h protects evening sleep pressure.
-- Never place a nap inside a `seek_light` window. Prefer the earliest slot inside an `avoid_light` window, so the nap doubles as darkness. Otherwise centre it in the allowed region. No slot → no nap.
+- Never place a nap inside a `seek_light` window, and never in the body-clock night or the first `NAP_AFTER_TMIN_H = 2` h after Tmin, i.e. outside `[t − (D − TminBeforeWake), t + 2h)` for every Tmin estimate `t`. Sleep inertia is worst near Tmin, and a short nap is hardest to keep short then (review fix: advance trips were getting a "07:30 nap" two hours after waking, just before Tmin). **DESIGN CHOICE.**
+- Within the region, choose the slot closest to the body-clock early afternoon (`t + 10h`, the same anchor as §7.1). No slot → no nap. (v0 preferred the earliest slot inside `avoid_light`; that is what put naps next to Tmin.)
+- At most one nap per day counts the in-flight nap below: a day that has one gets no ground nap.
+
+### 7.1 In-flight nap on a long travel day
+
+Evidence and rationale:
+
+- On long-haul flights, a planned **40-min rest opportunity** (average ~26 min of sleep) improved pilots' subsequent performance and physiological alertness compared with no nap (Rosekind1995, NASA cockpit-nap study). This is the closest operational evidence for a deliberate in-flight nap and sets our default length.
+- Naps of about 30 min and more carry sleep inertia on waking, and the shortest naps were the best overall after restricted sleep (BrooksLack2006). So the default stays at a 40-min *opportunity* (the traveller will usually sleep less), and the wording says to set an alarm.
+- After a very long wake, the trade-off shifts: sleep pressure is high and a short nap restores little. A nap of about one NREM–REM cycle (~90 min, widely used approximation; not primary-verified here) lets the traveller wake near the end of a cycle rather than from deep sleep. **DESIGN CHOICE.**
+- Timing: the body-clock early afternoon (Tmin + 10 h, ≈ 14:00 for a 04:00 Tmin) is the habitual post-lunch dip, when a nap comes easily, and it is far from the body-clock evening, so it costs the least of the next night's sleep pressure. **DESIGN CHOICE.**
+
+Engine rule (extension of §11 step 10):
+
+- For each leg: `awake = nextSleepStart − prevSleepEnd`, where `prevSleepEnd` is the last sleep that ends before landing (an in-flight sleep early on this leg counts) and `nextSleepStart` is the first sleep after landing; any sleep kind. Skip the leg when a sleep starts between `prevSleepEnd` and landing.
+- If `awake ≥ INFLIGHT_NAP_AWAKE_H` (18 h, **DESIGN CHOICE**), add one `nap` of `INFLIGHT_NAP_MIN` (40 min); if `awake ≥ INFLIGHT_NAP_LONG_AWAKE_H` (22 h, **DESIGN CHOICE**), try `INFLIGHT_NAP_LONG_MIN` (90 min) first. If the longer one does not fit, fall back to 40 then 20 min.
+- Allowed region: `[dep + 1h, arr − 1h]` (as for in-flight sleep) ∩ `[prevSleepEnd + FLIGHT_SLEEP_AFTER_WAKE_H (4 h), ∞)` (not in the first 4 h after waking, including waking from an in-flight sleep) ∩ `(−∞, nextSleepStart − CAFFEINE_CUTOFF_H (8 h)]` (not in the run-up to the next sleep, the same span in which caffeine is avoided to protect that sleep) ∩ awake − `seek_light`.
+- Within the region, choose the slot whose centre is closest to a body-clock early afternoon (`t + 10h` for any Tmin event `t`), on the 5-min output grid. No slot → no nap.
+- Rationale: "It's a long time awake today; a nap of up to 40 min on the plane now (set an alarm) helps you stay alert and still sleep tonight." / for 90 min: "…about one sleep cycle…, and waking after a full cycle limits grogginess."
+- Regression: SFO → NRT 2026-11-12 19:00Z → 2026-11-13 06:30Z (default profile) gets no in-flight sleep and ~21 h awake → a 40-min nap at 23:10–23:50Z (15:10 Pacific, 08:10 Tokyo; ≈ 13:40–14:20 on the body clock, whose Tmin is now 05:30 Pacific after 1.5 h of pre-flight delay).
 
 ---
 
@@ -215,7 +238,24 @@ Rule (**DESIGN CHOICE**):
 
 - If `stayDays` is given and `stayDays ≤ 2` and `|Δ| ≥ 3`, use `stay_on_home_time`.
 - If `stayDays ≤ 4` and the estimated days to adapt > `stayDays`, adapt anyway, but warn: "Short stay: you may only partly adapt before you return."
-- Return trips are not modelled in v0.
+
+### 8.1 Return trips (`buildReturnInput`)
+
+`buildReturnInput(outbound, returnLegs)` builds the return `TripInput`. It carries `sleep` and `prefs` unchanged and drops `stayDays`. The starting phase goes in the optional input field `startingBodyClockOffsetHours` (hours the body clock is **ahead** of the trip origin's local time; negative = behind; default 0; range ±12).
+
+How `buildPlan` uses the offset `o`: the body clock reaches Tmin `o` hours earlier on the origin clock (`t0 = local(origin, depDate − nPre, TminClock − o)`), and the shift to plan is `normalise(delta − o)` instead of `delta` (same strategy rules, §4, §8). `zoneDeltaHours` still reports the zone difference. For stay on home time, `remainingShiftHours` is that planned shift.
+
+Simplifying assumptions (**DESIGN CHOICE**):
+
+- The usual bed and wake times are read on the return origin's (the outbound destination's) clock: we assume the traveller kept the same wall-clock sleep times there, which is what the outbound plan scheduled.
+- The body clock moved exactly as the outbound plan's capped linear catch-up (§10) says. If the return departs before the outbound counted as adapted (i.e. the stay was shorter than the outbound `estimatedDaysToAdapt`), the body clock is **partly shifted**: `o = −remaining` at the return departure (rounded to 0.25 h). Once the outbound reaches `|remaining| ≤ ADAPTED_TOL`, it is taken as **fully adapted** (`o = 0`), since local light and sleep keep it there. The stay length in the outbound input only decides the strategy the traveller followed; the actual return departure decides how far the clock got.
+- Stay-on-home-time outbound trips leave the body on the outbound origin's clock (`o = −delta`), so the return usually needs no plan. Outbound trips under 2 h (`none`) are treated as absorbed (`o = 0`).
+- **No overlap with the outbound plan (review fix).** The return keeps `prefs.preAdapt`, but `prefs.maxPreDays` is capped by `returnStart(outbound, returnLegs)`:
+  - If the outbound plan has not adapted the traveller by the return departure, the outbound plan is still running, so the cap is **0**. The offset `o` is then read at the return plan's first Tmin, on the morning of the departure date (usual wake on the return origin's clock, not later than departure), because that is where the return plan's `t0` sits.
+  - Otherwise `o = 0` and the cap is the number of full local days strictly between the later of (outbound arrival, outbound adaptation) and the return departure date, at most `MAX_PRE_DAYS`.
+  - Without this, a 3-day stay got 3 return pre-days that began before the outbound flight had even landed, with opposite advice for the same dates, and the starting offset was counted twice.
+- The app clips an outbound plan where its return plan starts, so Today, the plan screen and reminders never show both.
+- Partial adaptation in reality depends on what light the traveller actually got; we cannot observe that.
 
 ---
 
@@ -280,8 +320,10 @@ function buildPlan(input):
   // ---------- 2. Phase estimate (origin clock) ----------
   off = clamp(TMIN_BEFORE_WAKE[chronotype], 1.5, D/2)
   TminClock = (W − off) mod 24
+  o = startingBodyClockOffsetHours ?? 0                       // §8.1; body clock ahead of origin
+  delta' = normalise(delta − o)                               // used for every strategy decision below
 
-  // ---------- 3. Strategy ----------
+  // ---------- 3. Strategy ----------  (delta below means delta' when o ≠ 0)
   if |delta| < MIN_SHIFT_TO_PLAN:                            // 2 h
      return {strategy:'none', zoneDeltaHours:delta, plannedShiftHours:0,
              estimatedDaysToAdapt:0, days:[], warnings:[]}
@@ -312,7 +354,7 @@ function buildPlan(input):
   // event before departure (e.g. the morning of day 0) gets rate 0.
   rate(phase, i) = phase=='pre' ? (i < nPre ? (dir>0 ? (mel?PRE_ADV_RATE_MEL:PRE_ADV_RATE) : PRE_DEL_RATE) : 0)
                                 : (dir>0 ? (mel?POST_ADV_RATE_MEL:POST_ADV_RATE) : POST_DEL_RATE)
-  t = local(origin, depDate − nPre days, TminClock)          // Tmin on the morning of the first plan day
+  t = local(origin, depDate − nPre days, TminClock − o)      // Tmin on the morning of the first plan day
   remaining = planned; events = []; postCount = 0; i = 0
   horizonEnd = min(arrive + h(24·MAX_POST_DAYS), stayDays ? arrive + h(24·stayDays) : +∞)
   loop:
@@ -335,17 +377,31 @@ function buildPlan(input):
      end   = start + h(D)                                      // W shifted by the same amount
      if end > depart − h(2): end = depart − h(2)               // leave for the airport
      add sleep(start, end) if end − start ≥ h(2)
-  // in-flight sleep: only on legs long enough, overlapping destination night
+  // in-flight sleep: only on legs long enough, overlapping destination night, and realistic
+  bodyNight(t, m) = [t − h(D − TminBeforeWake + m), t + h(TminBeforeWake + m)]   // habitual sleep on the body clock
+  realistic(w, woke) = w ∩ [woke + h(FLIGHT_SLEEP_AFTER_WAKE_H), ∞)               // 4 h
+                         ∩ (⋃_t bodyNight(t, FLIGHT_SLEEP_BODY_MARGIN_H)          // 2 h either side
+                            ∪ [woke + h(FLIGHT_SLEEP_PRESSURE_H), ∞))             // or 8 h awake
+                       (longest piece ≥ h(1.5), else none)
   for each leg with (arrive − depart) ≥ h(MIN_FLIGHT_SLEEP_H):  // 4 h
      for each destination night N = [local(dest, d, B), local(dest, d, B) + h(D)] overlapping the leg:
-        w = [leg.departUtc + h(1), leg.arriveUtc − h(1)] ∩ N
-        w.start = max(w.start, end of the previous sleep + h(FLIGHT_SLEEP_AFTER_WAKE_H))   // 4 h
-        add sleep(w) if |w| ≥ h(1.5)
+        w = realistic([leg.departUtc + h(1), leg.arriveUtc − h(1)] ∩ N, end of the previous sleep)
+        add sleep(w) if any
+  // review fix: a destination night at body-clock midday right after a full night (LHR → LAX
+  // 13:00–15:00Z, body clock ≈ 13:00) is not a sleep; the in-flight nap rule (§7.1) covers it.
   // night ends are wall-clock: a 23:00–07:00 night ends at 07:00 local even on a DST night
   // destination nights: habitual B/W on destination clock (DESIGN CHOICE: adopt local schedule on arrival)
   for each destination night N from the night containing/after arrival until the last event + 1 day:
      w = N ∩ [arrive + h(1), ∞)
      add sleep(w) if |w| ≥ h(2)
+  // awake cap (extension, review fix): for each leg ≥ 4 h, prevEnd = last sleep ending before takeoff,
+  // next = first sleep starting at or after takeoff (an in-flight sleep late in the leg counts as next,
+  // not as relief for the hours before it). If next − prevEnd > h(MAX_AWAKE_H = 20):
+  //    add the longest piece of bodyNight(t, 0) ∩ [dep + 1h, arr − 1h] ∩ [prevEnd + 4h, next] ≥ h(1.5)
+  // then re-check every in-flight sleep with realistic(·, end of the sleep before it), trimming or
+  // dropping it, so two in-flight sleeps are never minutes apart.
+  // (v0 applied the cap only to legs with no in-flight sleep at all, so CDG → SYD was told to stay
+  // awake 28 h, through its whole body-clock night on the plane, before a late in-flight sleep.)
   // the night before departure when nPre==0 is not shown
 
   awake = complement of sleeps over [planStart, planEnd]
@@ -382,14 +438,27 @@ function buildPlan(input):
         prevEnd = end of the previous sleep (or planStart)
         okEnd = S.start − h(8)
         dayRemaining = remaining of the latest event ≤ okEnd
-        if (okEnd − prevEnd ≥ h(1)) and (S starts in day 0 or later) and (S is in day 0 or |dayRemaining| ≥ 2):
+        if (okEnd − prevEnd ≥ h(1)) and (S starts in day 0 or later) and (S is in day 0 or the arrival day or |dayRemaining| ≥ 2):
            add 'caffeine_ok' [prevEnd, okEnd) ∩ awake
 
   // ---------- 10. Naps ----------
-  for each day d with dayIndex ≥ 0 (after arrival on day 0) and (d is day 0 or |remaining at day start| ≥ 3):
+  in-flight nap on a long travel day: see §7.1 (at most one nap per day including it)
+  for each day d with dayIndex ≥ 0 (after arrival) and (d is day 0 or the arrival day or |remaining at day start| ≥ 3) and no in-flight nap:
      region = awake ∩ [prevWake + h(2), nextSleepStart − h(6)) ∩ [arrive + h(1.5), ∞) − seek_light windows
-     slot = earliest 20-min slot inside (region ∩ avoid_light) else 20-min slot centred in the largest region piece
+              − ⋃_t [t − h(D − TminBeforeWake), t + h(NAP_AFTER_TMIN_H))        // body night through Tmin + 2 h
+     slot = 20-min slot in region closest to a body-clock early afternoon t + h(10)
+            (slots are placed on the 5-min output grid so they keep their exact length)
      add 'nap' if slot exists
+
+  // ---------- 10b. Output rounding and merging (once, at output) ----------
+  round every startUtc/endUtc to the nearest 5 min in UTC (OUTPUT_ROUND_MIN). All UTC offsets in use are
+     whole multiples of 15 min, so this is also the 5-min grid of every local clock (no "nap 14:13").
+     Rounding is monotone, so windows that did not overlap still do not, and nothing moves into a sleep.
+     tz labels are taken at the unrounded start.
+  merge same-kind windows that touch (end == start) when tz and rationale are identical.
+     Pieces split at landing keep different wording (window shade vs sunglasses) and stay separate;
+     the app can show them as one row with `groupContiguousWindows` (format.ts).
+  drop windows that became empty, light windows < MIN_WINDOW_H and caffeine_ok < 1 h.
 
   // ---------- 11. Bucket into days ----------
   day k<0 : [local(origin, depDate+k, 0), local(origin, depDate+k+1, 0)), tz=origin, date=depDate+k
@@ -398,7 +467,13 @@ function buildPlan(input):
   day k≥1 : [end of day k−1,               local(dest, F+k, 0)),           tz=dest,   date=F+k−1
   // so a date-line arrival two dates later (LAX→SYD) gets its own day 1; the app shows a
   // date chip for any window whose local date differs from the day's date (formatWindowLocal.localDate)
-  Assign each window to the day whose interval contains its startUtc. Sort by startUtc, then by kind.
+  Assign each window to the day whose interval contains its startUtc, except: a ground sleep starting
+     between 00:00 and 12:00 local belongs to the night of the previous date, so it is bucketed 12 h earlier
+     (when that stays on the same side of the journey and inside the plan), together with the ground windows
+     between that midnight and the sleep's start (review fix: with a 01:00 bedtime, the first pre-day had
+     no night and the next had two). Sort by startUtc, then by kind.
+  With stayDays: drop every window that starts after the end of the local date (destination clock) on
+     which arrive + stayDays falls, and the days left empty (review fix: advice after the traveller left).
   window.tz = tz the traveller is in at startUtc: origin before legs[0] departs; legs[i].to.tz during leg i
               and any layover after it; dest after final arrival.
   day.remainingShiftHours = round1(remaining of the last event with t ≤ the day's usual wake time
@@ -433,8 +508,12 @@ If home-time sleep overlaps fixed commitments the user must manage that; no nap 
 | avoid_light (advance) | "Light now would push your body clock the wrong way; keep it dim and wear sunglasses outside." |
 | avoid_light (delay) | "Light now would pull your body clock earlier; keep it dim and wear sunglasses outside." |
 | avoid_light (stay) | "Avoiding bright light now helps keep your body clock on home time." |
+| seek_light, dusk/dawn (§2 wording) | "Bright light now helps move your body clock earlier/later; get daylight while it's light out, otherwise bright indoor light or a light box." |
+| seek_light, dark | "…; it's likely dark outside, so use bright indoor light or a light box." / in flight: "…; it's likely dark outside, so use the reading light or a bright screen." |
+| avoid_light, dark | "Light now would push your body clock the wrong way; keep the lights dim and screens low." (delay: "…would pull your body clock earlier; …") |
 | sleep | "Sleeping now lines up with your plan for {destination or home} time." / in flight: "Try to sleep on the plane now; an eye mask and earplugs help." |
 | nap | "If you're sleepy, a short nap (10–20 min) is fine now; keep it short so it doesn't affect tonight." |
+| nap (in flight, §7.1) | "It's a long time awake today; a nap of up to 40 min on the plane now (set an alarm) helps you stay alert and still sleep tonight." / 90 min: "You'll be awake for about a day; a nap of up to 90 min (about one sleep cycle) on the plane now helps, and waking after a full cycle limits grogginess." |
 | caffeine_ok | "If you need it, caffeine now can help with daytime sleepiness without disturbing tonight's sleep." |
 | avoid_caffeine | "Skip caffeine from now until bedtime; it can disrupt sleep even hours later." |
 | melatonin | "A low dose (0.5 mg) of melatonin at this time is commonly used to help shift the body clock earlier; it can make some people drowsy." |
@@ -468,12 +547,23 @@ If home-time sleep overlaps fixed commitments the user must manage that; no nap 
 | MEL bedtime fallback range | [DLMO−6, DLMO−0.5] | Herxheimer2002 timing, limited to the advance side; DESIGN CHOICE |
 | MELATONIN_MAX_POST_DOSES | 5 | Herxheimer2002 (2–5 days) |
 | CAFFEINE_CUTOFF_H | 8 h before sleep | Gardiner2023 (8.8 h), Drake2013 (6 h insufficient at 400 mg) |
-| CAFFEINE_OK threshold | day 0 or |remaining| ≥ 2 | DESIGN CHOICE |
+| CAFFEINE_OK threshold | day 0, the arrival day, or |remaining| ≥ 2 | DESIGN CHOICE |
 | NAP_MIN | 20 min (advise 10–20) | BrooksLack2006, Rosekind1995 |
 | NAP_BEFORE_BED_H | 6 h | DESIGN CHOICE |
-| NAP threshold | day 0 or |remaining| ≥ 3 | DESIGN CHOICE |
+| NAP threshold | day 0, the arrival day, or |remaining| ≥ 3 | DESIGN CHOICE |
+| NAP_AFTER_TMIN_H | 2 h (no ground nap in the body night or before Tmin + 2 h) | DESIGN CHOICE (sleep inertia near Tmin) |
+| INFLIGHT_NAP_AWAKE_H / _LONG_AWAKE_H | 18 h / 22 h awake | DESIGN CHOICE (§7.1) |
+| INFLIGHT_NAP_MIN / _LONG_MIN / _SHORTEST_MIN | 40 / 90 / 20 min | Rosekind1995 (40-min opportunity); ~90-min sleep cycle widely used approximation; BrooksLack2006 |
+| NAP_BODY_AFTERNOON_AFTER_TMIN_H | 10 h | DESIGN CHOICE (body-clock early afternoon) |
+| OUTPUT_ROUND_MIN | 5 min | DESIGN CHOICE (display precision well inside the ±1–2 h phase error) |
+| MAX_START_OFFSET_H | 12 h | Range of `startingBodyClockOffsetHours` |
 | MIN_FLIGHT_SLEEP_H | 4 h leg duration | DESIGN CHOICE |
 | In-flight sleep min | 1.5 h | DESIGN CHOICE |
+| FLIGHT_SLEEP_AFTER_WAKE_H | 4 h (no in-flight sleep sooner after waking) | DESIGN CHOICE |
+| FLIGHT_SLEEP_BODY_MARGIN_H | 2 h either side of the body-clock night | DESIGN CHOICE |
+| FLIGHT_SLEEP_PRESSURE_H | 8 h awake makes in-flight sleep realistic at any body-clock time | DESIGN CHOICE |
+| MAX_AWAKE_H | 20 h before the awake-cap body-night sleep is added | DESIGN CHOICE |
+| DAYLIGHT_CORE_HOURS / DAYLIGHT_HOURS | 08:00–16:30 / 06:30–19:30 local, wording only | DESIGN CHOICE (no solar model) |
 
 All parameters should live in one exported `PARAMS` object so they can be tuned and tested.
 
@@ -523,6 +613,10 @@ Default profile unless stated: bed 23:00, wake 07:00, intermediate. Therefore ho
 - Strategy is independent of `useMelatonin` and `useCaffeine`.
 - Melatonin only appears when `useMelatonin` is true and strategy is `advance`. No caffeine windows when `useCaffeine` is false.
 - Days are ordered by dayIndex, with no gaps between the first and last emitted day except dropped empty days.
+- Every boundary is on the 5-min grid (UTC and local). Same-kind windows with the same tz and rationale never touch.
+- Ground naps are 20 min; in-flight naps are 20–90 min, inside the flight, and never overlap `avoid_caffeine`. At most one nap per day (a multi-leg travel day: one in-flight nap per leg).
+- Over a grid of ~650 single-leg trips: no awake span over `MAX_AWAKE_H` leaves ≥ 1.5 h of in-flight body-clock night awake, and every awake span over 22 h within 48 h of arrival contains a nap.
+- With `stayDays`, no window after the local date the stay ends. Return pre-days never start before the outbound plan has adapted the traveller.
 
 ---
 
@@ -535,5 +629,9 @@ Default profile unless stated: bed 23:00, wake 07:00, intermediate. Therefore ho
 - **Antidromic threshold** (10 h) is derived from our own rate assumptions, not from an empirical cut-off.
 - **Melatonin.** Product purity and dose vary (melatonin is unregulated as a supplement in some markets). We support advance timing only. Delay use is not implemented because evidence is weaker.
 - **Short-stay threshold** and several buffers (nap 6 h, caffeine 8 h, minimum shift 2 h) are design choices.
-- **Not modelled:** return trips, very long multi-stop itineraries treated as one adaptation, polar latitudes (daylight availability), and individual commitments (meetings during "avoid light").
+- **Return trips** use a simplified starting phase (§8.1): the outbound catch-up model is assumed to have been followed, with no allowance for missed light or partial adherence.
+- **In-flight nap thresholds** (18 h / 22 h awake) and the body-clock-afternoon timing are design choices.
+- **Daylight wording** uses fixed local-clock bands, not sunrise and sunset. Windows that straddle dusk or dawn get hedged wording ("while it's light out"); summer evenings at high latitudes are lighter than the wording assumes.
+- **Awake spans.** Some itineraries still mean 22–28 h between sleeps, with a nap (for example an early-morning arrival after a westward daytime flight). The engine never asks someone to stay awake through a body-clock night on the plane to get there.
+- **Not modelled:** very long multi-stop itineraries treated as one adaptation, chained trips (one destination after another), polar latitudes (daylight availability), and individual commitments (meetings during "avoid light").
 - **† items** were verified only from abstracts or secondary summaries because the sandbox blocked full text. Re-check them before any public claims.

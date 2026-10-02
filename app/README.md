@@ -25,7 +25,11 @@ Dev only: `EXPO_PUBLIC_PLAN_FIXTURE=1 npx expo start` renders a synthetic plan
 ## Layout
 
 - `src/app` routes (expo-router): `onboarding`, `(tabs)/index` (Today), `(tabs)/trips`,
-  `(tabs)/settings`, `trip/new`, `trip/[id]` (plan), `about`.
+  `(tabs)/settings`, `trip/new` (also `?edit=<id>` and `?returnOf=<id>`), `trip/[id]` (plan), `about`,
+  `+not-found` (unknown links).
+- `src/lib/plan.ts`: `computeTripPlan` (an outbound plan stops where its return plan starts; used by
+  Today, the plan screen, the trip list and reminders), day spans (`dayRange`, `dayAt`) and the
+  24-hour strips for a day (`dayStrips`: the travel day gets the arrival date on the destination clock too).
 - `src/lib/tz.ts`: Intl-based, DST-aware local-to-UTC conversion and formatting.
 - `src/lib/cities.ts`: ~90 major cities with IATA code and IANA zone.
 - `src/lib/notifications.ts` / `.web.ts`: local reminders (native) / no-op (web).

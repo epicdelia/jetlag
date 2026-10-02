@@ -1,6 +1,8 @@
-import { buildPlan, TripInputError, type AdviceWindow, type Plan, type TripInput } from '@jetlag/engine';
+import { buildPlan, TripInputError, type AdviceWindow, type DayPlan, type Plan, type TripInput } from '@jetlag/engine';
 
 import { buildFixturePlan } from './fixture';
+import type { Trip } from './types';
+import { dateKeyPlusDays, formatDateKey, localToUtc } from './tz';
 
 export type PlanResult =
   | { ok: true; plan: Plan; fixture: boolean }
@@ -62,4 +64,119 @@ export function planSpan(plan: Plan): { start: number; end: number } | null {
     end = Math.max(end, e);
   }
   return { start, end };
+}
+
+/** A plan as the app shows and reminds it: an outbound trip hands over to its return plan. */
+export type TripPlanResult = PlanResult & { handoffAt?: number; returnTrip?: Trip };
+
+/** Drop windows starting at or after `at`, and days left empty. */
+export function clipPlan(plan: Plan, at: number): Plan {
+  let changed = false;
+  const days: DayPlan[] = [];
+  for (const d of plan.days) {
+    const windows = d.windows.filter((w) => Date.parse(w.startUtc) < at);
+    if (windows.length !== d.windows.length) changed = true;
+    if (windows.length > 0 || (d.dayIndex === 0 && d.windows.length === 0)) days.push({ ...d, windows });
+    else changed = true;
+  }
+  return changed ? { ...plan, days } : plan;
+}
+
+/**
+ * The plan for `trip`. When another trip is its return journey, the outbound plan stops where the
+ * return plan starts, so Today, the plan screen and reminders never show both at once.
+ */
+export function computeTripPlan(trip: Trip, trips: readonly Trip[]): TripPlanResult {
+  const base = computePlan(trip.input);
+  if (!base.ok) return base;
+  const returnTrip = trips.find((t) => t.returnOf === trip.id);
+  if (!returnTrip) return base;
+  const r = computePlan(returnTrip.input);
+  const span = r.ok ? planSpan(r.plan) : null;
+  if (!span) return { ...base, returnTrip };
+  const plan = clipPlan(base.plan, span.start);
+  return { ...base, plan, returnTrip, handoffAt: plan === base.plan ? undefined : span.start };
+}
+
+/** UTC midnight-to-midnight bounds of a local date in a zone (01:00 if midnight does not exist). */
+export function localDayStart(date: string, tz: string): number | null {
+  const a = localToUtc(date, '00:00', tz);
+  if (a.ok) return a.ms;
+  const b = localToUtc(date, '01:00', tz);
+  return b.ok ? b.ms : null;
+}
+
+export interface DayRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * Time span of `plan.days[i]`. A day is its local date, except the travel day (day 0): it runs
+ * until the next plan day starts, so the arrival date belongs to it (SCIENCE.md §11 step 11).
+ */
+export function dayRange(plan: Plan, i: number): DayRange | null {
+  const d = plan.days[i];
+  if (!d) return null;
+  const start = localDayStart(d.date, d.tz);
+  const ownEnd = localDayStart(dateKeyPlusDays(d.date, 1), d.tz);
+  if (start == null || ownEnd == null) return null;
+  if (d.dayIndex !== 0) return { start, end: ownEnd };
+  const next = plan.days[i + 1];
+  if (next && next.dayIndex === 1) {
+    const ns = localDayStart(next.date, next.tz);
+    if (ns != null) return { start, end: Math.max(ownEnd, ns) };
+  }
+  // No day 1 (short plan, or clipped): extend to the end of the last window's local date.
+  let end = ownEnd;
+  for (const w of d.windows) {
+    const s = Date.parse(w.startUtc);
+    const e = localDayStart(dateKeyPlusDays(formatDateKey(s, w.tz), 1), w.tz);
+    if (e != null) end = Math.max(end, e);
+  }
+  return { start, end };
+}
+
+/** The plan day whose span contains `now`, with its index. */
+export function dayAt(plan: Plan, now: number): { day: DayPlan; index: number; range: DayRange } | null {
+  for (let i = 0; i < plan.days.length; i++) {
+    const range = dayRange(plan, i);
+    if (range && now >= range.start && now < range.end) return { day: plan.days[i]!, index: i, range };
+  }
+  return null;
+}
+
+export interface Strip {
+  date: string;
+  tz: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * The 24-hour strips that show a day: its own local date, plus, for a travel day that runs past
+ * that date, the arrival date on the destination clock.
+ */
+export function dayStrips(plan: Plan, i: number): Strip[] {
+  const d = plan.days[i];
+  const range = dayRange(plan, i);
+  if (!d || !range) return [];
+  const first = localDayStart(d.date, d.tz);
+  const firstEnd = localDayStart(dateKeyPlusDays(d.date, 1), d.tz);
+  if (first == null || firstEnd == null) return [];
+  const out: Strip[] = [{ date: d.date, tz: d.tz, start: first, end: firstEnd }];
+  if (range.end > firstEnd + 60000) {
+    const other = [...d.windows].reverse().find((w) => w.tz !== d.tz);
+    const tz = plan.days[i + 1]?.tz ?? other?.tz ?? d.tz;
+    const date = formatDateKey(range.end - 60000, tz);
+    const s = localDayStart(date, tz);
+    const e = localDayStart(dateKeyPlusDays(date, 1), tz);
+    if (s != null && e != null && !(date === d.date && tz === d.tz)) out.push({ date, tz, start: s, end: e });
+  }
+  return out;
+}
+
+/** True when the plan has melatonin windows (the clinician note must be shown with them). */
+export function hasMelatonin(plan: Plan): boolean {
+  return plan.days.some((d) => d.windows.some((w) => w.kind === 'melatonin'));
 }

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+  <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#0E1220"/>
+    <stop offset="0.42" stop-color="#2B3A7A"/>
+    <stop offset="0.78" stop-color="#C9789A"/>
+    <stop offset="1" stop-color="#F6B26B"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#FFE3A3" stop-opacity="0.55"/>
+    <stop offset="1" stop-color="#FFE3A3" stop-opacity="0"/>
+  </radialGradient>
+  <clipPath id="aboveHorizon"><rect x="0" y="0" width="1024" height="640"/></clipPath></defs>
+  <rect width="1024" height="1024" fill="url(#sky)"/>
+  
+</svg>

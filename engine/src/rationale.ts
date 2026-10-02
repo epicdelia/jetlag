@@ -7,12 +7,22 @@ export const RATIONALE = {
     "Bright light now helps move your body clock earlier; it's likely dark outside, so use bright indoor light or a light box.",
   seekDelayIndoor:
     "Bright light now helps move your body clock later; it's likely dark outside, so use bright indoor light or a light box.",
+  seekAdvanceDusk:
+    "Bright light now helps move your body clock earlier; get daylight while it's light out, otherwise bright indoor light or a light box.",
+  seekDelayDusk:
+    "Bright light now helps move your body clock later; get daylight while it's light out, otherwise bright indoor light or a light box.",
+  seekAdvanceFlightNight:
+    "Bright light now helps move your body clock earlier; it's likely dark outside, so use the reading light or a bright screen.",
+  seekDelayFlightNight:
+    "Bright light now helps move your body clock later; it's likely dark outside, so use the reading light or a bright screen.",
   seekAdvanceFlight:
     'Bright light now helps move your body clock earlier; open the window shade or use the reading light.',
   seekDelayFlight:
     'Bright light now helps move your body clock later; open the window shade or use the reading light.',
   avoidAdvance: 'Light now would push your body clock the wrong way; keep it dim and wear sunglasses outside.',
   avoidDelay: 'Light now would pull your body clock earlier; keep it dim and wear sunglasses outside.',
+  avoidAdvanceNight: 'Light now would push your body clock the wrong way; keep the lights dim and screens low.',
+  avoidDelayNight: 'Light now would pull your body clock earlier; keep the lights dim and screens low.',
   avoidAdvanceFlight:
     'Light now would push your body clock the wrong way; close the window shade, dim your screen or use an eye mask.',
   avoidDelayFlight:
@@ -25,6 +35,10 @@ export const RATIONALE = {
     `Going to bed ${formatHours(hours)} ${dir > 0 ? 'earlier' : 'later'} than usual starts moving your body clock toward destination time.`,
   sleepPreKeep: 'Keep your usual sleep times tonight so you get as much rest as possible before your flight.',
   nap: "If you're sleepy, a short nap (10–20 min) is fine now; keep it short so it doesn't affect tonight.",
+  napFlight: (minutes: number) =>
+    `It's a long time awake today; a nap of up to ${minutes} min on the plane now (set an alarm) helps you stay alert and still sleep tonight.`,
+  napFlightLong: (minutes: number) =>
+    `You'll be awake for about a day; a nap of up to ${minutes} min (about one sleep cycle) on the plane now helps, and waking after a full cycle limits grogginess.`,
   caffeineOk: "If you need it, caffeine now can help with daytime sleepiness without disturbing tonight's sleep.",
   avoidCaffeine: 'Skip caffeine from now until bedtime; it can disrupt sleep even hours later.',
   melatonin:

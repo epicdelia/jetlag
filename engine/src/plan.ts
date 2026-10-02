@@ -27,7 +27,6 @@ import {
   offsetMinutes,
   parseHHmm,
   parseInstant,
-  roundToMinute,
   toIso,
   wallParts,
 } from './time';
@@ -63,6 +62,8 @@ interface Normalized {
   preAdapt: boolean;
   maxPreDays: number;
   stayDays?: number;
+  /** Body clock ahead (+) of origin local time at plan start, hours. */
+  startOffsetH: number;
   warnings: string[];
 }
 
@@ -136,6 +137,15 @@ function validate(input: TripInput): Normalized {
     stayDays = sd;
   }
 
+  let startOffsetH = 0;
+  const so: unknown = (input as Partial<TripInput>).startingBodyClockOffsetHours;
+  if (so !== undefined && so !== null) {
+    if (typeof so !== 'number' || !Number.isFinite(so) || Math.abs(so) > PARAMS.MAX_START_OFFSET_H) {
+      fail(`startingBodyClockOffsetHours must be a number between -${PARAMS.MAX_START_OFFSET_H} and ${PARAMS.MAX_START_OFFSET_H}`);
+    }
+    startOffsetH = so;
+  }
+
   return {
     journey: makeJourney(legs),
     bedMin,
@@ -147,6 +157,7 @@ function validate(input: TripInput): Normalized {
     preAdapt,
     maxPreDays,
     stayDays,
+    startOffsetH,
     warnings,
   };
 }
@@ -155,12 +166,16 @@ function validate(input: TripInput): Normalized {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/** Net zone difference destination − origin at an instant, normalised to (−12, +14]. */
-export function zoneDelta(origin: string, dest: string, at: number): number {
-  let x = (offsetMinutes(dest, at) - offsetMinutes(origin, at)) / 60;
+/** Normalise an hour difference to (−12, +14]. */
+function normalizeDelta(x: number): number {
   while (x > 14) x -= 24;
   while (x <= -12) x += 24;
   return x;
+}
+
+/** Net zone difference destination − origin at an instant, normalised to (−12, +14]. */
+export function zoneDelta(origin: string, dest: string, at: number): number {
+  return normalizeDelta((offsetMinutes(dest, at) - offsetMinutes(origin, at)) / 60);
 }
 
 interface DayInterval {
@@ -214,7 +229,7 @@ function dayIntervals(
   return out;
 }
 
-interface RawWindow {
+export interface RawWindow {
   kind: AdviceKind;
   start: number;
   end: number;
@@ -238,14 +253,85 @@ function compareWindows(a: AdviceWindow, b: AdviceWindow): number {
   return Date.parse(a.endUtc) - Date.parse(b.endUtc);
 }
 
-function toWindow(j: Journey, w: RawWindow): AdviceWindow {
-  return {
+// Output grid. Every UTC offset in use is a whole number of 15 minutes, so a boundary on the
+// 5-minute UTC grid is also on the 5-minute grid of every local clock.
+const GRID = PARAMS.OUTPUT_ROUND_MIN * MINUTE;
+const roundG = (ms: number) => Math.round(ms / GRID) * GRID;
+const ceilG = (ms: number) => Math.ceil(ms / GRID) * GRID;
+const floorG = (ms: number) => Math.floor(ms / GRID) * GRID;
+
+/** Minimum length of a finished window of this kind, ms (0 = any positive length). */
+function minOutputLength(kind: AdviceKind): number {
+  if (kind === 'seek_light' || kind === 'avoid_light') return PARAMS.MIN_WINDOW_H * HOUR;
+  if (kind === 'caffeine_ok') return PARAMS.CAFFEINE_OK_MIN_H * HOUR;
+  return 0;
+}
+
+/**
+ * Turn raw windows into output windows, once, at the end:
+ * 1. Round every boundary to the nearest OUTPUT_ROUND_MIN minutes. Rounding is monotone, so
+ *    windows that did not overlap still do not (touching stays touching) and nothing that was
+ *    outside a sleep moves inside it. Naps are placed on the grid already, so keep their length.
+ * 2. Merge same-kind windows that touch or overlap when they share tz and rationale (e.g. an
+ *    avoid-light window split only by a few minutes that rounding closed). Windows whose wording
+ *    differs (in-flight vs on-the-ground light advice split at landing) are kept separate.
+ * 3. Drop windows that rounding made empty or shorter than their kind's minimum.
+ * tz is taken at the unrounded start, so the label follows where the traveller really is.
+ */
+export function finalizeWindows(j: Journey, raw: RawWindow[]): AdviceWindow[] {
+  interface W {
+    kind: AdviceKind;
+    start: number;
+    end: number;
+    tz: string;
+    rationale: string;
+  }
+  const rounded: W[] = raw.map((w) => ({
     kind: w.kind,
-    startUtc: toIso(w.start),
-    endUtc: toIso(w.end),
+    start: roundG(w.start),
+    end: roundG(w.end),
     tz: tzAt(j, w.start),
     rationale: w.rationale,
-  };
+  }));
+  const point = (k: AdviceKind) => k === 'melatonin';
+  const mergeable = (k: AdviceKind) => !point(k) && k !== 'nap';
+  const kept = rounded.filter((w) => point(w.kind) || w.end > w.start);
+  kept.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: W[] = [];
+  const open = new Map<string, W>();
+  for (const w of kept) {
+    const key = `${w.kind}|${w.tz}|${w.rationale}`;
+    const prev = mergeable(w.kind) ? open.get(key) : undefined;
+    if (prev && w.start <= prev.end) {
+      prev.end = Math.max(prev.end, w.end);
+      continue;
+    }
+    const copy = { ...w };
+    merged.push(copy);
+    if (mergeable(w.kind)) open.set(key, copy);
+  }
+  return merged
+    .filter((w) => point(w.kind) || w.end - w.start >= Math.max(minOutputLength(w.kind), GRID))
+    .map((w) => ({ kind: w.kind, startUtc: toIso(w.start), endUtc: toIso(w.end), tz: w.tz, rationale: w.rationale }));
+}
+
+/**
+ * Start of a `len`-long slot on the output grid inside one of `pieces`, as close as possible
+ * to one of `anchors` (centre of the slot), or null if no piece can hold it.
+ */
+function slotNear(pieces: Interval[], len: number, anchors: number[]): number | null {
+  let best: { start: number; score: number } | null = null;
+  for (const [s0, e0] of pieces) {
+    const s = ceilG(s0);
+    const e = floorG(e0);
+    if (e - s < len) continue;
+    for (const a of anchors) {
+      const start = Math.min(Math.max(roundG(a - len / 2), s), e - len);
+      const score = Math.abs(start + len / 2 - a);
+      if (!best || score < best.score) best = { start, score };
+    }
+  }
+  return best ? best.start : null;
 }
 
 const round1 = (x: number) => {
@@ -276,6 +362,7 @@ function caffeineWindows(
   awake: Interval[],
   planStart: number,
   day0: DayInterval,
+  arrivalDay: DayInterval,
   remainingAt: (ms: number) => number,
 ): RawWindow[] {
   const cutoff = PARAMS.CAFFEINE_CUTOFF_H * HOUR;
@@ -287,11 +374,13 @@ function caffeineWindows(
     avoid.push(...intersect([[S.start - cutoff, S.start]], awake));
     const okEnd = S.start - cutoff;
     const startsDay0OrLater = S.start >= day0.start;
-    const inDay0 = S.start >= day0.start && S.start < day0.end;
+    // The travel day and the arrival day (which is day 1 after a date-line arrival two dates
+    // later) always qualify; later days only while far from adapted.
+    const exempt = [day0, arrivalDay].some((d) => S.start >= d.start && S.start < d.end);
     if (
       okEnd - prevEnd >= PARAMS.CAFFEINE_OK_MIN_H * HOUR &&
       startsDay0OrLater &&
-      (inDay0 || Math.abs(remainingAt(okEnd)) >= PARAMS.CAFFEINE_OK_REMAINING)
+      (exempt || Math.abs(remainingAt(okEnd)) >= PARAMS.CAFFEINE_OK_REMAINING)
     ) {
       ok.push(...intersect([[prevEnd, okEnd]], awake));
     }
@@ -310,9 +399,34 @@ function sleepRationale(S: SleepBlock, dir: number, stay: boolean): string {
   return stay ? RATIONALE.sleepHome : RATIONALE.sleepDest;
 }
 
-function windowsInDay(windows: AdviceWindow[], d: DayInterval): AdviceWindow[] {
-  return windows.filter((w) => {
+/**
+ * Which instant decides the day a window belongs to. Usually its start. A ground sleep that
+ * starts between midnight and noon (bedtime after midnight, or a pre-flight night moved later)
+ * belongs to the night of the previous date, so it is bucketed 12 h earlier, as long as that
+ * stays on the same side of the journey (before departure, or after arrival) and in the plan.
+ * Ground windows between that midnight and the sleep's start (the rest of the same evening) go
+ * with it, so days stay in time order.
+ */
+function makeBucket(j: Journey, windows: AdviceWindow[], planStart: number): (w: AdviceWindow) => number {
+  const moved: { start: number; midnight: number; at: number }[] = [];
+  for (const w of windows) {
     const ms = Date.parse(w.startUtc);
+    if (w.kind !== 'sleep' || inFlight(j, ms) || wallParts(w.tz, ms).hour >= 12) continue;
+    const at = ms - 12 * HOUR;
+    if (ms < j.depart ? at < planStart : at < j.arrive) continue;
+    moved.push({ start: ms, midnight: localToUtc(w.tz, localDayNumber(w.tz, ms), 0), at });
+  }
+  return (w) => {
+    const ms = Date.parse(w.startUtc);
+    if (inFlight(j, ms)) return ms;
+    const m = moved.find((x) => ms >= x.midnight && ms <= x.start);
+    return m ? m.at : ms;
+  };
+}
+
+function windowsInDay(windows: AdviceWindow[], d: DayInterval, bucket: (w: AdviceWindow) => number): AdviceWindow[] {
+  return windows.filter((w) => {
+    const ms = bucket(w);
     return ms >= d.start && ms < d.end;
   });
 }
@@ -321,10 +435,11 @@ function assembleDays(
   days: DayInterval[],
   windows: AdviceWindow[],
   remainingOf: (d: DayInterval) => number,
+  bucket: (w: AdviceWindow) => number,
 ): DayPlan[] {
   const out: DayPlan[] = [];
   for (const d of days) {
-    const ws = windowsInDay(windows, d).sort(compareWindows);
+    const ws = windowsInDay(windows, d, bucket).sort(compareWindows);
     if (ws.length === 0 && d.index !== 0) continue; // drop empty days except day 0
     out.push({
       date: dayNumberToIso(d.dayNum),
@@ -337,21 +452,47 @@ function assembleDays(
   return out;
 }
 
-/** True when most of [s, e) falls in local night hours (no daylight to promise; no solar model). */
-function isNightTime(tz: string, s: number, e: number): boolean {
-  const p = wallParts(tz, Math.round((s + e) / 2));
-  const h = p.hour + p.minute / 60;
-  return h < PARAMS.DAYLIGHT_HOURS[0] || h >= PARAMS.DAYLIGHT_HOURS[1];
+type DayPart = 'day' | 'night' | 'mixed';
+
+/**
+ * Whether [s, e) is likely daylight, likely dark, or straddles dusk/dawn on the local clock of
+ * `tz`, for rationale wording only (no solar model, no latitude). Every 15-minute sample must be
+ * inside DAYLIGHT_CORE_HOURS (daylight even in winter at mid latitudes) for 'day', or outside
+ * DAYLIGHT_HOURS for 'night'.
+ */
+function dayPart(tz: string, s: number, e: number): DayPart {
+  const samples: number[] = [];
+  for (let t = s; t < e; t += 15 * MINUTE) samples.push(t);
+  samples.push(Math.max(s, e - MINUTE));
+  let core = 0;
+  let night = 0;
+  for (const t of samples) {
+    const p = wallParts(tz, t);
+    const h = p.hour + p.minute / 60;
+    if (h >= PARAMS.DAYLIGHT_CORE_HOURS[0] && h < PARAMS.DAYLIGHT_CORE_HOURS[1]) core++;
+    if (h < PARAMS.DAYLIGHT_HOURS[0] || h >= PARAMS.DAYLIGHT_HOURS[1]) night++;
+  }
+  const total = samples.length;
+  if (core === total) return 'day';
+  if (night === total) return 'night';
+  return 'mixed';
 }
 
-function lightRationale(kind: 'seek' | 'avoid', dir: number, flight: boolean, night = false): string {
+function lightRationale(kind: 'seek' | 'avoid', dir: number, flight: boolean, part: DayPart): string {
+  const adv = dir > 0;
   if (kind === 'seek') {
-    if (flight) return dir > 0 ? RATIONALE.seekAdvanceFlight : RATIONALE.seekDelayFlight;
-    if (night) return dir > 0 ? RATIONALE.seekAdvanceIndoor : RATIONALE.seekDelayIndoor;
-    return dir > 0 ? RATIONALE.seekAdvance : RATIONALE.seekDelay;
+    if (flight) {
+      if (part === 'night') return adv ? RATIONALE.seekAdvanceFlightNight : RATIONALE.seekDelayFlightNight;
+      return adv ? RATIONALE.seekAdvanceFlight : RATIONALE.seekDelayFlight;
+    }
+    if (part === 'night') return adv ? RATIONALE.seekAdvanceIndoor : RATIONALE.seekDelayIndoor;
+    if (part === 'mixed') return adv ? RATIONALE.seekAdvanceDusk : RATIONALE.seekDelayDusk;
+    return adv ? RATIONALE.seekAdvance : RATIONALE.seekDelay;
   }
-  if (dir > 0) return flight ? RATIONALE.avoidAdvanceFlight : RATIONALE.avoidAdvance;
-  return flight ? RATIONALE.avoidDelayFlight : RATIONALE.avoidDelay;
+  if (flight) return adv ? RATIONALE.avoidAdvanceFlight : RATIONALE.avoidDelayFlight;
+  // No "sunglasses outside" advice when it is dark outside anyway.
+  if (part === 'night') return adv ? RATIONALE.avoidAdvanceNight : RATIONALE.avoidDelayNight;
+  return adv ? RATIONALE.avoidAdvance : RATIONALE.avoidDelay;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,13 +521,17 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
   // 1. Zone delta
   const delta = zoneDelta(j.origin, j.dest, j.arrive);
 
-  // 2. Phase estimate (origin clock)
+  // 2. Phase estimate (origin clock). A body clock that starts ahead of origin time by `o` hours
+  // (return trip after partial adaptation) reaches Tmin o hours earlier on the origin clock, and
+  // needs to move (delta − o) hours rather than delta.
   const tminMin = tminClockMinutes(n.bedMin, n.wakeMin, n.chronotype);
+  const tminStartMin = tminMin - n.startOffsetH * 60;
+  const shift = Math.round(normalizeDelta(delta - n.startOffsetH) * 1e6) / 1e6;
   const depDate = localDayNumber(j.origin, j.depart);
   const arrDate = localDayNumber(j.dest, j.arrive);
 
   // 3. Strategy
-  if (Math.abs(delta) < PARAMS.MIN_SHIFT_TO_PLAN) {
+  if (Math.abs(shift) < PARAMS.MIN_SHIFT_TO_PLAN) {
     return {
       plan: {
         strategy: 'none',
@@ -402,24 +547,24 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
   if (
     n.stayDays !== undefined &&
     n.stayDays <= PARAMS.STAY_HOME_MAX_DAYS &&
-    Math.abs(delta) >= PARAMS.STAY_HOME_MIN_DELTA
+    Math.abs(shift) >= PARAMS.STAY_HOME_MIN_DELTA
   ) {
-    return stayOnHomeTimePlan(n, delta, tminMin, depDate, arrDate, warnings);
+    return stayOnHomeTimePlan(n, delta, shift, tminMin, tminStartMin, depDate, arrDate, warnings);
   }
 
   let strategy: Strategy;
   let planned: number;
-  if (delta > 0 && delta >= PARAMS.ANTIDROMIC_EAST_THRESHOLD) {
+  if (shift > 0 && shift >= PARAMS.ANTIDROMIC_EAST_THRESHOLD) {
     strategy = 'delay';
-    planned = -(24 - delta);
-    warnings.push(WARNINGS.antidromic(delta));
-  } else if (delta > 0) {
+    planned = -(24 - shift);
+    warnings.push(WARNINGS.antidromic(shift));
+  } else if (shift > 0) {
     strategy = 'advance';
-    planned = delta;
-    if (delta >= PARAMS.ANTIDROMIC_RISK_LOW) warnings.push(WARNINGS.largeEast);
+    planned = shift;
+    if (shift >= PARAMS.ANTIDROMIC_RISK_LOW) warnings.push(WARNINGS.largeEast);
   } else {
     strategy = 'delay';
-    planned = delta;
+    planned = shift;
   }
   const dir = Math.sign(planned);
   if (strategy === 'delay' && n.useMelatonin) warnings.push(WARNINGS.melatoninDelay);
@@ -456,7 +601,7 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
 
   // 5. Simulate Tmin
   const mel = n.useMelatonin && dir > 0;
-  const t0 = localToUtc(j.origin, depDate - nPre, tminMin);
+  const t0 = localToUtc(j.origin, depDate - nPre, tminStartMin);
   const maxHorizon = j.arrive + PARAMS.MAX_POST_DAYS * DAY;
   const horizonEnd = n.stayDays !== undefined ? Math.min(maxHorizon, j.arrive + n.stayDays * DAY) : maxHorizon;
   // The target is the habitual Tmin on the destination's *local* clock, so a destination DST
@@ -500,6 +645,20 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
       }
     }
   }
+  // Body-clock nights: the habitual sleep period placed on each Tmin estimate (plus one day
+  // either side of the simulated events, unshifted, so flights past the last event are covered).
+  const tminBeforeWakeH = ((((n.wakeMin - tminMin) % 1440) + 1440) % 1440) / 60;
+  const bodyTmins = [
+    events[0]!.t - DAY,
+    ...events.map((e) => e.t),
+    ...[1, 2, 3].map((k) => lastEvent.t + k * DAY),
+  ];
+  const bodyNight = (t: number, marginH: number): Interval => [
+    t - (n.durH - tminBeforeWakeH + marginH) * HOUR,
+    t + (tminBeforeWakeH + marginH) * HOUR,
+  ];
+  const bodyNightsWide = normalize(bodyTmins.map((t) => bodyNight(t, PARAMS.FLIGHT_SLEEP_BODY_MARGIN_H)));
+
   // In-flight sleep never starts within FLIGHT_SLEEP_AFTER_WAKE_H of the previous sleep's end
   // (sleep that soon after waking is unlikely; it would also fall in the body-clock morning).
   const lastWakeBefore = (ms: number) =>
@@ -508,12 +667,26 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     const s = Math.max(piece[0], wokeAt + PARAMS.FLIGHT_SLEEP_AFTER_WAKE_H * HOUR);
     return piece[1] - s >= PARAMS.MIN_FLIGHT_SLEEP_WINDOW_H * HOUR ? [s, piece[1]] : null;
   };
+  // In-flight sleep that is realistic after waking at `woke`: not within FLIGHT_SLEEP_AFTER_WAKE_H
+  // of waking, and either (near) the body-clock night or after FLIGHT_SLEEP_PRESSURE_H awake. A
+  // destination night at body-clock midday a few hours after waking is not a realistic sleep
+  // (the in-flight nap rule covers that case).
+  const realisticFlightSleep = (piece: Interval, woke: number): Interval | null => {
+    const q = awakeEnough(piece, woke);
+    if (!q) return null;
+    const ok: Interval[] = [...bodyNightsWide, [woke + PARAMS.FLIGHT_SLEEP_PRESSURE_H * HOUR, Infinity]];
+    let best: Interval | null = null;
+    for (const r of minLen(intersect([q], ok), PARAMS.MIN_FLIGHT_SLEEP_WINDOW_H)) {
+      if (!best || r[1] - r[0] > best[1] - best[0]) best = r;
+    }
+    return best;
+  };
   for (const leg of j.legs) {
     const woke = lastWakeBefore(leg.dep);
     for (const N of nightsOverlapping(j.dest, leg.dep, leg.arr, n.bedMin, n.durH)) {
       for (const p of flightPieces({ ...j, legs: [leg] }, N)) {
-        const q = awakeEnough(p, woke);
-        if (q) sleeps.push({ start: q[0], end: q[1], kind: 'flight' });
+        const r = realisticFlightSleep(p, woke);
+        if (r) sleeps.push({ start: r[0], end: r[1], kind: 'flight' });
       }
     }
   }
@@ -523,24 +696,42 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
       sleeps.push({ start: s, end: e, kind: 'dest' });
     }
   }
-  // Extension: a long flight with no destination-night sleep that would leave the traveller
-  // awake for more than MAX_AWAKE_H gets in-flight sleep in the body-clock night instead.
-  const tminBeforeWakeH = (((n.wakeMin - tminMin) % 1440) + 1440) % 1440 / 60;
+  // Extension: a long leg that would leave the traveller awake for more than MAX_AWAKE_H, from
+  // the last sleep before it to the first sleep on it or after it (an in-flight sleep late in
+  // the flight does not count as relief for the hours before it), gets in-flight sleep in the
+  // body-clock night. A later in-flight sleep on the leg is then re-checked below.
   for (const leg of j.legs) {
     if (leg.arr - leg.dep < PARAMS.MIN_FLIGHT_SLEEP_H * HOUR) continue;
-    if (sleeps.some((S) => S.kind === 'flight' && S.start >= leg.dep && S.end <= leg.arr)) continue;
     const prevEnd = Math.max(planStart, ...sleeps.filter((S) => S.end <= leg.dep).map((S) => S.end));
-    const nextStart = Math.min(...sleeps.filter((S) => S.start >= leg.arr).map((S) => S.start));
+    const nextStart = Math.min(...sleeps.filter((S) => S.start >= leg.dep).map((S) => S.start));
     if (nextStart - prevEnd <= PARAMS.MAX_AWAKE_H * HOUR) continue;
     let best: Interval | null = null;
-    for (const e of events) {
-      const bodyNight: Interval = [e.t - (n.durH - tminBeforeWakeH) * HOUR, e.t + tminBeforeWakeH * HOUR];
-      for (const p0 of flightPieces({ ...j, legs: [leg] }, bodyNight)) {
-        const p = awakeEnough(p0, prevEnd);
-        if (p && (!best || p[1] - p[0] > best[1] - best[0])) best = p;
+    for (const t of bodyTmins) {
+      for (const p0 of flightPieces({ ...j, legs: [leg] }, bodyNight(t, 0))) {
+        const p1 = awakeEnough(p0, prevEnd);
+        if (!p1) continue;
+        // Only the part before the first existing sleep on or after this leg.
+        const p: Interval = [p1[0], Math.min(p1[1], nextStart)];
+        if (p[1] - p[0] < PARAMS.MIN_FLIGHT_SLEEP_WINDOW_H * HOUR) continue;
+        if (!best || p[1] - p[0] > best[1] - best[0]) best = p;
       }
     }
     if (best) sleeps.push({ start: best[0], end: best[1], kind: 'flight' });
+  }
+  // A body-night sleep added above can sit just before a later in-flight sleep: re-check every
+  // in-flight sleep against the sleep before it (trim, or drop when no longer realistic).
+  sleeps.sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 1; i < sleeps.length; i++) {
+    const S = sleeps[i]!;
+    if (S.kind !== 'flight') continue;
+    const r = realisticFlightSleep([S.start, S.end], sleeps[i - 1]!.end);
+    if (r) {
+      S.start = r[0];
+      S.end = r[1];
+    } else {
+      sleeps.splice(i, 1);
+      i--;
+    }
   }
   sleeps.sort((a, b) => a.start - b.start || a.end - b.end);
 
@@ -585,11 +776,12 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     raw.push({ kind: 'sleep', start: S.start, end: S.end, rationale: sleepRationale(S, dir, false) });
   }
   for (const [s, e] of seekLight) {
-    const rationale = lightRationale('seek', dir, inFlight(j, s), isNightTime(tzAt(j, s), s, e));
+    const rationale = lightRationale('seek', dir, inFlight(j, s), dayPart(tzAt(j, s), s, e));
     raw.push({ kind: 'seek_light', start: s, end: e, rationale });
   }
   for (const [s, e] of avoidLight) {
-    raw.push({ kind: 'avoid_light', start: s, end: e, rationale: lightRationale('avoid', dir, inFlight(j, s)) });
+    const rationale = lightRationale('avoid', dir, inFlight(j, s), dayPart(tzAt(j, s), s, e));
+    raw.push({ kind: 'avoid_light', start: s, end: e, rationale });
   }
 
   // 8. Melatonin (advance only)
@@ -617,15 +809,59 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
 
   const days = dayIntervals(j, nPre, depDate, arrDate, Math.max(planStart, ...raw.map((w) => w.start)), 0);
   const day0 = days.find((d) => d.index === 0)!;
+  // The arrival day: the first day with waking time on the ground after landing. Usually day 0;
+  // day 1 when the arrival date is two dates after departure (date line).
+  const arrivalDay =
+    days.find((d) => d.index >= 0 && d.end > j.arrive + PARAMS.NAP_AFTER_ARRIVAL_H * HOUR) ?? day0;
 
   // 9. Caffeine
-  if (n.useCaffeine) raw.push(...caffeineWindows(sleeps, awake, planStart, day0, remainingAt));
+  if (n.useCaffeine) raw.push(...caffeineWindows(sleeps, awake, planStart, day0, arrivalDay, remainingAt));
 
-  // 10. Naps
+  // 10a. In-flight nap on a long travel day (§7.1): a leg where the traveller would otherwise be
+  // awake ≥ INFLIGHT_NAP_AWAKE_H from the last sleep before landing (in-flight sleep included)
+  // to the first sleep after it. Not within FLIGHT_SLEEP_AFTER_WAKE_H of waking, not in the
+  // caffeine cut-off run-up to the next sleep (protects sleep pressure for that night), never in
+  // seek-light, and as close as possible to the body-clock early afternoon.
+  const napStarts: number[] = [];
+  for (const leg of j.legs) {
+    // Awake span around the end of this leg: from the last sleep that ends before landing (an
+    // in-flight sleep on this leg included) to the first sleep after landing.
+    const prevEnd = Math.max(planStart, ...sleeps.filter((S) => S.end <= leg.arr).map((S) => S.end));
+    if (sleeps.some((S) => S.start >= prevEnd && S.start < leg.arr)) continue;
+    const nextStart = Math.min(planEnd, ...sleeps.filter((S) => S.start >= leg.arr).map((S) => S.start));
+    const awakeH = (nextStart - prevEnd) / HOUR;
+    if (awakeH < PARAMS.INFLIGHT_NAP_AWAKE_H) continue;
+    const lo = Math.max(leg.dep + PARAMS.FLIGHT_SLEEP_BUFFER_H * HOUR, prevEnd + PARAMS.FLIGHT_SLEEP_AFTER_WAKE_H * HOUR);
+    const hi = Math.min(leg.arr - PARAMS.FLIGHT_SLEEP_BUFFER_H * HOUR, nextStart - PARAMS.CAFFEINE_CUTOFF_H * HOUR);
+    if (hi <= lo) continue;
+    const pieces = subtract(intersect([[lo, hi]], awake), seekLight);
+    const anchors = bodyTmins.map((t) => t + PARAMS.NAP_BODY_AFTERNOON_AFTER_TMIN_H * HOUR);
+    const long = awakeH >= PARAMS.INFLIGHT_NAP_LONG_AWAKE_H;
+    const lengths = long
+      ? [PARAMS.INFLIGHT_NAP_LONG_MIN, PARAMS.INFLIGHT_NAP_MIN, PARAMS.INFLIGHT_NAP_SHORTEST_MIN]
+      : [PARAMS.INFLIGHT_NAP_MIN, PARAMS.INFLIGHT_NAP_SHORTEST_MIN];
+    for (const minutes of lengths) {
+      const start = slotNear(pieces, minutes * MINUTE, anchors);
+      if (start === null) continue;
+      const rationale =
+        minutes >= PARAMS.INFLIGHT_NAP_LONG_MIN ? RATIONALE.napFlightLong(minutes) : RATIONALE.napFlight(minutes);
+      raw.push({ kind: 'nap', start, end: start + minutes * MINUTE, rationale });
+      napStarts.push(start);
+      break;
+    }
+  }
+
+  // 10b. Ground naps (§7), at most one nap per day including any in-flight nap.
   const napLen = PARAMS.NAP_MIN * MINUTE;
+  const napAnchors = bodyTmins.map((t) => t + PARAMS.NAP_BODY_AFTERNOON_AFTER_TMIN_H * HOUR);
+  const napBlocked: Interval[] = bodyTmins.map((t) => [
+    bodyNight(t, 0)[0],
+    t + PARAMS.NAP_AFTER_TMIN_H * HOUR,
+  ]);
   for (const d of days) {
     if (d.index < 0) continue;
-    if (!(d.index === 0 || Math.abs(remainingAt(d.start)) >= PARAMS.NAP_REMAINING)) continue;
+    if (napStarts.some((t) => t >= d.start && t < d.end)) continue;
+    if (!(d.index === 0 || d === arrivalDay || Math.abs(remainingAt(d.start)) >= PARAMS.NAP_REMAINING)) continue;
     const lo = Math.max(d.start, j.arrive + PARAMS.NAP_AFTER_ARRIVAL_H * HOUR);
     if (lo >= d.end) continue;
     const region: Interval[] = [];
@@ -634,28 +870,32 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
       const b = sleeps[i + 1]!.start - PARAMS.NAP_BEFORE_BED_H * HOUR;
       region.push(...intersect([[a, b]], [[lo, d.end]]));
     }
-    const usable = subtract(intersect(region, awake), seekLight).filter(([s, e]) => e - s >= napLen);
-    if (usable.length === 0) continue;
-    const dark = intersect(usable, avoidLight).filter(([s, e]) => e - s >= napLen);
-    let start: number;
-    if (dark.length > 0) {
-      start = dark[0]![0];
-    } else {
-      let best = usable[0]!;
-      for (const p of usable) if (p[1] - p[0] > best[1] - best[0]) best = p;
-      start = roundToMinute((best[0] + best[1]) / 2 - napLen / 2);
-      start = Math.min(Math.max(start, best[0]), best[1] - napLen);
-    }
+    // Work on the output grid so the nap keeps its exact length after rounding. Never in
+    // seek-light, and never in the body-clock night or the first NAP_AFTER_TMIN_H after Tmin,
+    // when sleep inertia is worst. Prefer the body-clock early afternoon (as for in-flight naps).
+    const fits = ([s, e]: Interval) => floorG(e) - ceilG(s) >= napLen;
+    const usable = subtract(intersect(region, awake), [...seekLight, ...napBlocked]).filter(fits);
+    const start = slotNear(usable, napLen, napAnchors);
+    if (start === null) continue;
     raw.push({ kind: 'nap', start, end: start + napLen, rationale: RATIONALE.nap });
   }
 
-  // 11. Bucket into days
-  const windows = raw.filter((w) => w.start >= planStart && w.start < planEnd).map((w) => toWindow(j, w));
+  // 11. Bucket into days. With a known stay, nothing is planned after the local date on which
+  // the stay ends (the traveller has left; the horizon warning already says the plan is cut).
+  const stayCutoff =
+    n.stayDays !== undefined
+      ? localToUtc(j.dest, localDayNumber(j.dest, j.arrive + n.stayDays * DAY) + 1, 0)
+      : Infinity;
+  const windowEnd = Math.min(planEnd, stayCutoff);
+  const windows = finalizeWindows(j, raw.filter((w) => w.start >= planStart && w.start < windowEnd));
+  const bucket = makeBucket(j, windows, planStart);
   let lastIndex = 0;
   for (const d of days) {
     const active =
-      windowsInDay(windows, d).length > 0 ||
-      events.some((e) => e.t >= d.start && e.t < d.end && Math.abs(e.remaining) > PARAMS.ADAPTED_TOL);
+      windowsInDay(windows, d, bucket).length > 0 ||
+      events.some(
+        (e) => e.t >= d.start && e.t < d.end && e.t < stayCutoff && Math.abs(e.remaining) > PARAMS.ADAPTED_TOL,
+      );
     if (active) lastIndex = Math.max(lastIndex, d.index);
   }
   // Sampled at the day's usual wake time (local to the day's zone): "this morning's" estimate,
@@ -668,6 +908,7 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     days.filter((d) => d.index <= lastIndex),
     windows,
     remainingOf,
+    bucket,
   );
 
   return {
@@ -690,7 +931,9 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
 function stayOnHomeTimePlan(
   n: Normalized,
   delta: number,
+  shift: number,
   tminMin: number,
+  tminStartMin: number,
   depDate: number,
   arrDate: number,
   warningsIn: string[],
@@ -730,8 +973,8 @@ function stayOnHomeTimePlan(
   const avoidRaw: Interval[] = [];
   const lastOriginDay = localDayNumber(j.origin, planEnd) + 1;
   for (let d = depDate - 1, i = 0; d <= lastOriginDay; d++, i++) {
-    const t = localToUtc(j.origin, d, tminMin);
-    events.push({ t, remaining: delta, phase: t < j.depart ? 'pre' : 'post', index: i });
+    const t = localToUtc(j.origin, d, tminStartMin);
+    events.push({ t, remaining: shift, phase: t < j.depart ? 'pre' : 'post', index: i });
     avoidRaw.push(...intersect([[t + PARAMS.STAY_AVOID[0] * HOUR, t + PARAMS.STAY_AVOID[1] * HOUR]], awake));
   }
   const avoidLight = minLen(splitAt(normalize(avoidRaw), j.cuts), PARAMS.MIN_WINDOW_H);
@@ -743,11 +986,12 @@ function stayOnHomeTimePlan(
   }
   for (const [s, e] of avoidLight) raw.push({ kind: 'avoid_light', start: s, end: e, rationale: RATIONALE.avoidStay });
   if (n.useCaffeine) {
-    raw.push(...caffeineWindows(sleeps, awake, planStart, days.find((d) => d.index === 0)!, () => delta));
+    const day0 = days.find((d) => d.index === 0)!;
+    raw.push(...caffeineWindows(sleeps, awake, planStart, day0, day0, () => shift));
   }
 
-  const windows = raw.filter((w) => w.start >= planStart && w.start < planEnd).map((w) => toWindow(j, w));
-  const planDays = assembleDays(days, windows, () => delta);
+  const windows = finalizeWindows(j, raw.filter((w) => w.start >= planStart && w.start < planEnd));
+  const planDays = assembleDays(days, windows, () => shift, makeBucket(j, windows, planStart));
 
   return {
     plan: {

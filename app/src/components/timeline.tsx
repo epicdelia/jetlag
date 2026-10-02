@@ -3,8 +3,8 @@ import { StyleSheet, View } from 'react-native';
 
 import { AdviceLabels, AdviceOrder, Radius, Spacing } from '@/constants/theme';
 import { usePalette } from '@/hooks/use-palette';
-import { allWindows, isPoint } from '@/lib/plan';
-import { dateKeyPlusDays, formatDateKey, formatDateLabel, formatTime, localToUtc, zoneAbbr } from '@/lib/tz';
+import { allWindows, isPoint, type Strip } from '@/lib/plan';
+import { formatDateKey, formatDateLabel, formatTime, offsetMinutes, zoneAbbr } from '@/lib/tz';
 import { T } from './ui';
 
 /** "07:00–09:30 JST", "at 17:30 JST"; adds "(+1)" when the end falls on a later local date. */
@@ -25,21 +25,27 @@ export function dayTitle(d: DayPlan): string {
   return `Day ${d.dayIndex} after departure`;
 }
 
-export function shiftStatus(hours: number): string {
-  const h = Math.round(Math.abs(hours) * 2) / 2;
-  if (h < 0.5) return 'Body clock: adapted to local time';
-  return hours > 0
-    ? `Body clock: ~${h}h behind local time`
-    : `Body clock: ~${h}h ahead of local time`;
-}
+const half = (h: number) => Math.round(Math.abs(h) * 2) / 2;
 
-function dayBounds(d: DayPlan): { start: number; end: number } | null {
-  const a = localToUtc(d.date, '00:00', d.tz);
-  const b = localToUtc(dateKeyPlusDays(d.date, 1), '00:00', d.tz);
-  const a2 = a.ok ? a : localToUtc(d.date, '01:00', d.tz);
-  const b2 = b.ok ? b : localToUtc(dateKeyPlusDays(d.date, 1), '01:00', d.tz);
-  if (!a2.ok || !b2.ok) return null;
-  return { start: a2.ms, end: b2.ms };
+/**
+ * Body-clock status for a day. `remainingShiftHours` is measured against destination time, so
+ * it is converted to the clock where the traveller is (`localTz`, default the day's zone): on a
+ * pre-flight day at home, or a stay-on-home-time day, local time and destination time differ.
+ */
+export function shiftStatus(day: DayPlan, destTz: string, destName?: string, localTz: string = day.tz): string {
+  const mid = Date.parse(`${day.date}T12:00:00Z`);
+  const destAhead = (offsetMinutes(mid, destTz) - offsetMinutes(mid, localTz)) / 60;
+  const vsLocal = day.remainingShiftHours - destAhead; // + = body clock behind local time
+  const local = half(vsLocal);
+  const head =
+    local < 0.5
+      ? 'Body clock: in step with local time'
+      : `Body clock: ~${local}h ${vsLocal > 0 ? 'behind' : 'ahead of'} local time`;
+  if (localTz === destTz || Math.abs(destAhead) < 0.25) return head;
+  const dest = half(day.remainingShiftHours);
+  const where = destName ? `${destName} time` : 'destination time';
+  if (dest < 0.5) return `${head}, in step with ${where}`;
+  return `${head}, ~${dest}h ${day.remainingShiftHours > 0 ? 'behind' : 'ahead of'} ${where}`;
 }
 
 const LANES: { key: string; label: string; kinds: AdviceKind[] }[] = [
@@ -50,13 +56,13 @@ const LANES: { key: string; label: string; kinds: AdviceKind[] }[] = [
 ];
 
 /**
- * 24-hour strip for one local day (in the day's zone). Includes windows from
- * neighbouring days that overlap it (e.g. last night's sleep).
+ * 24-hour strip for one local date on one clock (`strip.tz`). Includes windows from
+ * neighbouring days that overlap it (e.g. last night's sleep). `caption` names the date and
+ * clock when a day needs more than one strip (travel day: departure date and arrival date).
  */
-export function DayStrip({ plan, day, now }: { plan: Plan; day: DayPlan; now?: number }) {
+export function DayStrip({ plan, strip, now, caption }: { plan: Plan; strip: Strip; now?: number; caption?: string }) {
   const { c, advice } = usePalette();
-  const b = dayBounds(day);
-  if (!b) return null;
+  const b = strip;
   const span = b.end - b.start;
   const ws = allWindows(plan).filter((w) => {
     const s = Date.parse(w.startUtc);
@@ -71,8 +77,13 @@ export function DayStrip({ plan, day, now }: { plan: Plan; day: DayPlan; now?: n
   return (
     <View
       accessible
-      accessibilityLabel={`Timeline for ${formatDateLabel(day.date)}. Details are listed below.`}
+      accessibilityLabel={`Timeline for ${formatDateLabel(strip.date)}, ${zoneAbbr(strip.start, strip.tz)}. Details are listed below.`}
       style={{ gap: 6 }}>
+      {caption ? (
+        <T variant="small" muted>
+          {caption}
+        </T>
+      ) : null}
       {lanes.map((lane) => (
         <View key={lane.key} style={s.laneRow}>
           <T variant="small" muted style={s.laneLabel} numberOfLines={1}>

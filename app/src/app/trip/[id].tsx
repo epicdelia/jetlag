@@ -7,13 +7,13 @@ import { StrategyCard } from '@/components/strategy-card';
 import { DayStrip, Legend, WindowRow, dayTitle, shiftStatus } from '@/components/timeline';
 import { TripLegs } from '@/components/trip-summary';
 import { Banner, Button, Card, Screen, T } from '@/components/ui';
-import { SAFETY_NOTE } from '@/constants/copy';
+import { MELATONIN_NOTE, SAFETY_NOTE } from '@/constants/copy';
 import { Spacing } from '@/constants/theme';
 import { useNow } from '@/hooks/use-now';
-import { computePlan } from '@/lib/plan';
+import { computeTripPlan, dayStrips, hasMelatonin } from '@/lib/plan';
 import { useAppStore } from '@/lib/store';
 import { prefsForNow, sleepProfileError } from '@/lib/trip-form';
-import { formatDateLabel, zoneAbbr } from '@/lib/tz';
+import { formatDateLabel, formatDateTime, zoneAbbr } from '@/lib/tz';
 import { labelForZone } from '@/lib/cities';
 
 export default function PlanScreen() {
@@ -21,7 +21,8 @@ export default function PlanScreen() {
   const { trips, profile, saveTrip, deleteTrip } = useAppStore();
   const now = useNow();
   const trip = trips.find((t) => t.id === id);
-  const result = useMemo(() => (trip ? computePlan(trip.input) : null), [trip]);
+  const returnTrip = trip ? trips.find((t) => t.returnOf === trip.id) : undefined;
+  const result = useMemo(() => (trip ? computeTripPlan(trip, trips) : null), [trip, trips]);
 
   if (!trip || !result) {
     return (
@@ -35,6 +36,7 @@ export default function PlanScreen() {
 
   // Map zones to the place names the user picked, for day headers.
   const zoneNames = new Map<string, string>();
+  const destTz = trip.input.legs[trip.input.legs.length - 1]!.to.tz;
   for (const l of trip.input.legs) {
     if (l.from.label) zoneNames.set(l.from.tz, l.from.label.replace(/\s*\([A-Z]{3}\)$/, ''));
     if (l.to.label) zoneNames.set(l.to.tz, l.to.label.replace(/\s*\([A-Z]{3}\)$/, ''));
@@ -111,14 +113,24 @@ export default function PlanScreen() {
         <>
           {result.fixture ? <Banner>Development fixture data. Not a real plan.</Banner> : null}
           <StrategyCard plan={result.plan} />
+          {hasMelatonin(result.plan) ? <Banner tone="info">{MELATONIN_NOTE}</Banner> : null}
+          {result.handoffAt != null && result.returnTrip ? (
+            <Banner tone="info">
+              <T variant="small">
+                From {formatDateTime(result.handoffAt, destTz)} {zoneAbbr(result.handoffAt, destTz)}, your return plan
+                takes over, so this plan stops there.
+              </T>
+            </Banner>
+          ) : null}
           {result.plan.days.length > 0 ? (
             <Legend
               kinds={Array.from(new Set(result.plan.days.flatMap((d) => d.windows.map((w) => w.kind)))) as AdviceKind[]}
             />
           ) : null}
-          {result.plan.days.map((d) => {
+          {result.plan.days.map((d, di) => {
             const zone = zoneNames.get(d.tz) ?? labelForZone(d.tz);
             const mid = Date.parse(`${d.date}T12:00:00Z`);
+            const strips = dayStrips(result.plan, di);
             return (
               <Card key={`${d.dayIndex}-${d.date}`} style={{ gap: Spacing.md }}>
                 <View style={{ gap: 2 }}>
@@ -127,10 +139,23 @@ export default function PlanScreen() {
                     {formatDateLabel(d.date)} · {zone}
                   </T>
                   <T variant="small" muted>
-                    Times in {zoneAbbr(mid, d.tz)} ({d.tz}) unless marked. {shiftStatus(d.remainingShiftHours)}.
+                    Times in {zoneAbbr(mid, d.tz)} ({d.tz}) unless marked.{' '}
+                    {shiftStatus(d, destTz, zoneNames.get(destTz))}.
                   </T>
                 </View>
-                <DayStrip plan={result.plan} day={d} now={now} />
+                {strips.map((st) => (
+                  <DayStrip
+                    key={`${st.date}-${st.tz}`}
+                    plan={result.plan}
+                    strip={st}
+                    now={now}
+                    caption={
+                      strips.length > 1
+                        ? `${formatDateLabel(st.date)} · ${zoneNames.get(st.tz) ?? labelForZone(st.tz)} (${zoneAbbr(st.start + 12 * 3600e3, st.tz)})`
+                        : undefined
+                    }
+                  />
+                ))}
                 {d.windows.length === 0 ? (
                   <T variant="secondary">Nothing special today: keep to local daytime and night.</T>
                 ) : (
@@ -147,6 +172,29 @@ export default function PlanScreen() {
           })}
         </>
       )}
+
+      <View style={{ gap: Spacing.sm }}>
+        {returnTrip ? (
+          <Button
+            title="View my return plan"
+            kind="secondary"
+            onPress={() => router.push({ pathname: '/trip/[id]', params: { id: returnTrip.id } })}
+          />
+        ) : !trip.returnOf ? (
+          <Button
+            title="Plan my return"
+            kind="secondary"
+            accessibilityHint="Opens a new trip with this route reversed"
+            onPress={() => router.push({ pathname: '/trip/new', params: { returnOf: trip.id } })}
+          />
+        ) : null}
+        <Button
+          title="Edit trip"
+          kind="secondary"
+          accessibilityHint="Change flights or stay; the plan and reminders are rebuilt"
+          onPress={() => router.push({ pathname: '/trip/new', params: { edit: trip.id } })}
+        />
+      </View>
 
       <T variant="small" muted>
         {SAFETY_NOTE}

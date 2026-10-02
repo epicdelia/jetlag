@@ -4,8 +4,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MaxContentWidth, Radius, Spacing } from '@/constants/theme';
 import { usePalette } from '@/hooks/use-palette';
-import { labelForZone, searchCities, type City } from '@/lib/cities';
-import { formatOffset, isValidTimeZone } from '@/lib/tz';
+import { CITIES, labelForZone, searchCities, type City } from '@/lib/cities';
+import { canonicalZone, formatOffset, isValidTimeZone } from '@/lib/tz';
 import { Button, Field, T } from './ui';
 
 export interface PickedPlace {
@@ -104,7 +104,8 @@ function CityPickerModal({
     }
     setManualErr(null);
     setManual('');
-    onPick({ tz, label: labelForZone(tz) });
+    const canonical = canonicalZone(tz, CITIES.map((city) => city.tz));
+    onPick({ tz: canonical, label: labelForZone(canonical) });
   };
 
   return (

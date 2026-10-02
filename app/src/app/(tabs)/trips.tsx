@@ -5,7 +5,7 @@ import { TripLegs } from '@/components/trip-summary';
 import { Button, Card, Pill, Screen, T } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { usePalette } from '@/hooks/use-palette';
-import { computePlan, planSpan } from '@/lib/plan';
+import { computeTripPlan, planSpan } from '@/lib/plan';
 import { useAppStore } from '@/lib/store';
 import { formatSignedHours } from '@/lib/tz';
 
@@ -31,7 +31,7 @@ export default function Trips() {
         <T variant="secondary">No trips yet. Add your flights to get a day-by-day plan.</T>
       ) : null}
       {sorted.map((t) => {
-        const r = computePlan(t.input);
+        const r = computeTripPlan(t, trips);
         const span = r.ok ? planSpan(r.plan) : null;
         const past = span ? span.end < now : false;
         return (

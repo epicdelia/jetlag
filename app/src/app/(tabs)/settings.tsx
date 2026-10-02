@@ -1,5 +1,5 @@
-import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Platform, View } from 'react-native';
 
 import { ProfileForm } from '@/components/profile-form';
@@ -15,17 +15,33 @@ const LEADS = ['0', '10', '30'] as const;
 export default function Settings() {
   const { profile, setProfile, settings, setSettings, reminders, resync, resetAll } = useAppStore();
   const [perm, setPerm] = useState<PermissionState>('undetermined');
-  // Edits are kept as a draft and saved only while the engine can use them, so an
-  // out-of-range sleep profile never reaches new trips.
+  // Edits are kept as a draft. Stepping through times passes values nobody chose, so nothing is
+  // saved per step: the draft is saved with Save, or when leaving the screen if the engine can use
+  // it. An out-of-range draft is discarded on leaving, so it never reaches new trips.
   const [draft, setDraft] = useState<Profile | null>(profile);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
   useEffect(() => {
-    if (profile && (!draft || sleepProfileError(draft.sleep) === null)) setDraft(profile);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setDraft(profile);
   }, [profile]);
-  const onProfileChange = (p: Profile) => {
-    setDraft(p);
-    if (sleepProfileError(p.sleep) === null) setProfile(p);
+  const changed = !!draft && !!profile && JSON.stringify(draft) !== JSON.stringify(profile);
+  const saveDraft = () => {
+    if (draft && sleepProfileError(draft.sleep) === null) void setProfile(draft);
   };
+  useFocusEffect(
+    useCallback(
+      () => () => {
+        const d = draftRef.current;
+        const p = profileRef.current;
+        if (!d || !p || JSON.stringify(d) === JSON.stringify(p)) return;
+        if (sleepProfileError(d.sleep) === null) void setProfile(d);
+        else setDraft(p);
+      },
+      [setProfile],
+    ),
+  );
 
   useEffect(() => {
     void getPermission().then(setPerm);
@@ -51,12 +67,24 @@ export default function Settings() {
   return (
     <Screen>
       <Card>
-        <ProfileForm value={draft} onChange={onProfileChange} />
-        <T variant="small" muted style={{ marginTop: Spacing.sm }}>
+        <ProfileForm value={draft} onChange={setDraft} />
+        <T variant="small" muted style={{ marginTop: Spacing.sm }} accessibilityLiveRegion="polite">
           {draftInvalid
-            ? 'Not saved yet: your previous sleep times stay in use until these are in range.'
-            : 'Changes apply to new trips. Existing plans offer a one-tap rebuild.'}
+            ? `Not saved: these sleep times are out of range. Your saved times (bed ${profile.sleep.usualBedtime}, wake ${profile.sleep.usualWake}) stay in use, and leaving this screen discards these.`
+            : changed
+              ? 'Unsaved changes. They are saved when you tap Save or leave this screen. They apply to new trips; existing plans offer a one-tap rebuild.'
+              : 'Saved. Changes apply to new trips; existing plans offer a one-tap rebuild.'}
         </T>
+        {changed ? (
+          <View style={{ flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm }}>
+            <View style={{ flex: 1 }}>
+              <Button title="Save" onPress={saveDraft} disabled={draftInvalid} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button title="Discard" kind="secondary" onPress={() => setDraft(profile)} />
+            </View>
+          </View>
+        ) : null}
       </Card>
 
       <Card>

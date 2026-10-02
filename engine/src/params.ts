@@ -51,6 +51,12 @@ export const PARAMS = {
    * them, seek-light advice says bright indoor light instead of daylight (no solar model).
    */
   DAYLIGHT_HOURS: [6.5, 19.5] as const,
+  /**
+   * Local hours [from, to) that are daylight year-round at mid latitudes, including winter
+   * (no solar model, no latitude). Only light windows entirely inside them say "ideally
+   * daylight"; windows that straddle the edges say daylight "if it's light out" (DESIGN CHOICE).
+   */
+  DAYLIGHT_CORE_HOURS: [8, 16.5] as const,
   /** Stay-on-home-time avoid-light window around home Tmin. */
   STAY_AVOID: [-4, 4] as const,
   /** Light windows shorter than this are dropped (DESIGN CHOICE). */
@@ -77,7 +83,7 @@ export const PARAMS = {
   CAFFEINE_CUTOFF_H: 8,
   /** caffeine_ok needs at least this long a slot. */
   CAFFEINE_OK_MIN_H: 1,
-  /** caffeine_ok after day 0 only while |remaining| ≥ this (DESIGN CHOICE). */
+  /** caffeine_ok after the arrival day only while |remaining| ≥ this (DESIGN CHOICE). */
   CAFFEINE_OK_REMAINING: 2,
   /** Nap length, minutes (BrooksLack2006, Rosekind1995). */
   NAP_MIN: 20,
@@ -87,7 +93,12 @@ export const PARAMS = {
   NAP_AFTER_WAKE_H: 2,
   /** No nap sooner than this after landing (deplaning, immigration, transfer; DESIGN CHOICE). */
   NAP_AFTER_ARRIVAL_H: 1.5,
-  /** Naps after day 0 only while |remaining| ≥ this (DESIGN CHOICE). */
+  /**
+   * Ground naps stay out of the body-clock night and the first hours after it: not before
+   * Tmin + this many hours, when sleep inertia is worst (DESIGN CHOICE).
+   */
+  NAP_AFTER_TMIN_H: 2,
+  /** Naps after the arrival day only while |remaining| ≥ this (DESIGN CHOICE). */
   NAP_REMAINING: 3,
   /** Legs shorter than this get no in-flight sleep (DESIGN CHOICE). */
   MIN_FLIGHT_SLEEP_H: 4,
@@ -95,14 +106,48 @@ export const PARAMS = {
   MIN_FLIGHT_SLEEP_WINDOW_H: 1.5,
   /** In-flight sleep starts at least this long after the previous sleep ended (DESIGN CHOICE). */
   FLIGHT_SLEEP_AFTER_WAKE_H: 4,
+  /**
+   * In-flight sleep is placed only inside the body-clock night (habitual sleep period on the
+   * current Tmin estimate) widened by this many hours on each side. A destination night that
+   * falls in the body-clock daytime is not a realistic sleep (DESIGN CHOICE).
+   */
+  FLIGHT_SLEEP_BODY_MARGIN_H: 2,
+  /**
+   * ...unless the traveller has been awake at least this long by then: with that much sleep
+   * pressure, sleep on the plane is realistic at any body-clock time (DESIGN CHOICE).
+   */
+  FLIGHT_SLEEP_PRESSURE_H: 8,
   /** In-flight sleep keeps this far from takeoff and landing. */
   FLIGHT_SLEEP_BUFFER_H: 1,
   /**
-   * If a long flight gets no destination-night sleep and the traveller would otherwise be
-   * awake longer than this, schedule in-flight sleep during the body-clock night instead
-   * (DESIGN CHOICE; extension to SCIENCE.md §11 step 6).
+   * If the traveller would be awake longer than this from the last sleep before a long leg to
+   * the first sleep on or after it (including a late in-flight sleep), schedule in-flight sleep
+   * during the body-clock night (DESIGN CHOICE; extension to SCIENCE.md §11 step 6).
    */
   MAX_AWAKE_H: 20,
+  /**
+   * In-flight nap on a long travel day (SCIENCE.md §7.1): when no in-flight sleep is placed on a
+   * leg and the traveller would be awake at least this long from the last sleep before the leg
+   * to the first sleep after it (DESIGN CHOICE).
+   */
+  INFLIGHT_NAP_AWAKE_H: 18,
+  /** Awake at least this long → the in-flight nap may be one full sleep cycle (DESIGN CHOICE). */
+  INFLIGHT_NAP_LONG_AWAKE_H: 22,
+  /** In-flight nap opportunity, minutes (Rosekind1995: 40-min planned rest, ~26 min asleep). */
+  INFLIGHT_NAP_MIN: 40,
+  /** Long-wake in-flight nap, minutes: about one NREM–REM cycle (widely used approximation). */
+  INFLIGHT_NAP_LONG_MIN: 90,
+  /** Shortest in-flight nap worth suggesting when a longer one does not fit, minutes. */
+  INFLIGHT_NAP_SHORTEST_MIN: 20,
+  /**
+   * Preferred in-flight nap time: the body-clock early afternoon, this many hours after the
+   * current Tmin estimate (≈ 14:00 for a 04:00 Tmin; DESIGN CHOICE).
+   */
+  NAP_BODY_AFTERNOON_AFTER_TMIN_H: 10,
+  /** Every window boundary is rounded to this many minutes at output (DESIGN CHOICE). */
+  OUTPUT_ROUND_MIN: 5,
+  /** Allowed |TripInput.startingBodyClockOffsetHours|. */
+  MAX_START_OFFSET_H: 12,
   /** Minimum ground sleep window. */
   MIN_GROUND_SLEEP_H: 2,
   /** Leave for the airport: ground sleep ends this long before a departure. */

@@ -1,7 +1,7 @@
 import type { AdviceKind } from '@jetlag/engine';
 
 import { AdviceLabels } from '@/constants/theme';
-import { computePlan, isPoint } from './plan';
+import { computeTripPlan, isPoint } from './plan';
 import type { Trip } from './types';
 import { formatTime, zoneAbbr } from './tz';
 
@@ -32,7 +32,8 @@ const NOTIFY_KINDS: ReadonlySet<AdviceKind> = new Set<AdviceKind>([
 export function upcomingReminders(trips: Trip[], leadMinutes: number, now = Date.now()): Reminder[] {
   const out: Reminder[] = [];
   for (const trip of trips) {
-    const r = computePlan(trip.input);
+    // An outbound plan stops where its return plan starts, so the two never both remind.
+    const r = computeTripPlan(trip, trips);
     if (!r.ok || r.fixture) continue;
     for (const day of r.plan.days) {
       for (const w of day.windows) {

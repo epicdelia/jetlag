@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            engine/package-lock.json
+            app/package-lock.json
+
+      - name: Install engine dependencies
+        working-directory: engine
+        run: npm ci
+
+      - name: Engine tests
+        working-directory: engine
+        run: npx vitest run
+
+      - name: Engine type check
+        working-directory: engine
+        run: npx tsc --noEmit
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: App type check
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: App web export
+        working-directory: app
+        env:
+          CI: 1
+        run: npx expo export --platform web

@@ -1,6 +1,7 @@
 import type { Chronotype } from '@jetlag/engine';
 import { View } from 'react-native';
 
+import { MELATONIN_NOTE } from '@/constants/copy';
 import { Spacing } from '@/constants/theme';
 import { usePalette } from '@/hooks/use-palette';
 import { sleepProfileError } from '@/lib/trip-form';
@@ -25,11 +26,6 @@ export const CHRONOTYPES: { value: Chronotype; label: string; explain: string }[
     explain: 'Left to yourself, you would stay up late and sleep in.',
   },
 ];
-
-export const MELATONIN_NOTE =
-  'Melatonin is commonly used for jet lag, but it is a hormone. Talk to a clinician before using it, ' +
-  'especially if you are pregnant or breastfeeding, take other medication, or have a medical condition. ' +
-  'Product strength and purity vary by brand and country.';
 
 export function ProfileForm({ value, onChange }: { value: Profile; onChange: (p: Profile) => void }) {
   const { c } = usePalette();
