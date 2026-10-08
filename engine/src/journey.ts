@@ -1,7 +1,7 @@
 /** Where the traveller is at a given instant, and sleep-placement helpers around flights. */
 
 import { PARAMS } from './params';
-import { HOUR, MINUTE, localDayNumber, localToUtc, offsetMinutes } from './time';
+import { DAY, HOUR, MINUTE, localDayNumber, localToUtc, offsetMinutes } from './time';
 import { intersect, normalize, type Interval } from './intervals';
 
 export interface Leg {
@@ -72,13 +72,23 @@ export function wallEnd(tz: string, start: number, durH: number): number {
   return end > start ? end : naive;
 }
 
+/**
+ * The habitual night of calendar day `dayNum` on the `tz` clock. The alarm rings at the usual
+ * local wake time, DST nights included: a bedtime inside a spring-forward gap is moved later by
+ * the gap (nightStart), and the wake time is not (that night is shorter by the gap).
+ */
+export function habitualNight(tz: string, dayNum: number, bedMin: number, durH: number): Interval {
+  const s = nightStart(tz, dayNum, bedMin);
+  const requestedWall = (bedMin >= 720 ? dayNum : dayNum + 1) * DAY + Math.round(bedMin * MINUTE);
+  const gap = s + offsetMinutes(tz, s) * MINUTE - requestedWall;
+  const e = wallEnd(tz, s, durH) - Math.max(0, gap);
+  return [s, e > s ? e : wallEnd(tz, s, durH)];
+}
+
 /** Habitual nights (on `tz` clock) whose start falls on days [fromDay, toDay]. */
 export function nights(tz: string, fromDay: number, toDay: number, bedMin: number, durH: number): Interval[] {
   const out: Interval[] = [];
-  for (let d = fromDay; d <= toDay; d++) {
-    const s = nightStart(tz, d, bedMin);
-    out.push([s, wallEnd(tz, s, durH)]);
-  }
+  for (let d = fromDay; d <= toDay; d++) out.push(habitualNight(tz, d, bedMin, durH));
   return out;
 }
 
@@ -89,7 +99,7 @@ export function nightsOverlapping(tz: string, a: number, b: number, bedMin: numb
   );
 }
 
-export type SleepKind = 'mask' | 'pre' | 'flight' | 'layover' | 'dest' | 'home';
+export type SleepKind = 'mask' | 'pre' | 'flight' | 'layover' | 'dest' | 'home' | 'recovery';
 
 export interface SleepBlock {
   start: number;

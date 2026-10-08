@@ -15,12 +15,19 @@ export type PlanResult =
 const USE_FIXTURE = __DEV__ && process.env.EXPO_PUBLIC_PLAN_FIXTURE === '1';
 
 const cache = new Map<string, PlanResult>();
+// Stored trips keep their input objects, so most calls hit this without serialising the input.
+const byInput = new WeakMap<TripInput, PlanResult>();
 
 /** Calls the real engine (`buildPlan`). Pure and memoised by input. */
 export function computePlan(input: TripInput): PlanResult {
+  const same = byInput.get(input);
+  if (same) return same;
   const key = JSON.stringify(input);
   const hit = cache.get(key);
-  if (hit) return hit;
+  if (hit) {
+    byInput.set(input, hit);
+    return hit;
+  }
   let result: PlanResult;
   if (USE_FIXTURE) {
     result = { ok: true, plan: buildFixturePlan(input), fixture: true };
@@ -34,6 +41,7 @@ export function computePlan(input: TripInput): PlanResult {
   }
   if (cache.size > 50) cache.clear();
   cache.set(key, result);
+  byInput.set(input, result);
   return result;
 }
 
@@ -45,11 +53,17 @@ export function isPoint(w: AdviceWindow): boolean {
   return w.startUtc === w.endUtc;
 }
 
-/** All windows in the plan, sorted by start. */
-export function allWindows(plan: Plan): AdviceWindow[] {
+const windowsCache = new WeakMap<Plan, readonly AdviceWindow[]>();
+
+/** All windows in the plan, sorted by start. Cached per plan object: do not mutate. */
+export function allWindows(plan: Plan): readonly AdviceWindow[] {
+  const hit = windowsCache.get(plan);
+  if (hit) return hit;
   const out: AdviceWindow[] = [];
   for (const d of plan.days) out.push(...d.windows);
-  return out.sort((a, b) => Date.parse(a.startUtc) - Date.parse(b.startUtc));
+  out.sort((a, b) => Date.parse(a.startUtc) - Date.parse(b.startUtc));
+  windowsCache.set(plan, out);
+  return out;
 }
 
 /** UTC span covered by the plan's windows, or null if empty. */
@@ -82,9 +96,14 @@ export function clipPlan(plan: Plan, at: number): Plan {
   return changed ? { ...plan, days } : plan;
 }
 
+// computePlan results are cached by input, so (outbound result, return trip, return result)
+// identifies a clipped plan; reusing it keeps the plan object stable across renders.
+const tripPlanCache = new WeakMap<PlanResult, WeakMap<Trip, { r: PlanResult; out: TripPlanResult }>>();
+
 /**
  * The plan for `trip`. When another trip is its return journey, the outbound plan stops where the
  * return plan starts, so Today, the plan screen and reminders never show both at once.
+ * Returns the same object for the same inputs.
  */
 export function computeTripPlan(trip: Trip, trips: readonly Trip[]): TripPlanResult {
   const base = computePlan(trip.input);
@@ -92,18 +111,34 @@ export function computeTripPlan(trip: Trip, trips: readonly Trip[]): TripPlanRes
   const returnTrip = trips.find((t) => t.returnOf === trip.id);
   if (!returnTrip) return base;
   const r = computePlan(returnTrip.input);
+  let byTrip = tripPlanCache.get(base);
+  const hit = byTrip?.get(returnTrip);
+  if (hit && hit.r === r) return hit.out;
   const span = r.ok ? planSpan(r.plan) : null;
-  if (!span) return { ...base, returnTrip };
-  const plan = clipPlan(base.plan, span.start);
-  return { ...base, plan, returnTrip, handoffAt: plan === base.plan ? undefined : span.start };
+  let out: TripPlanResult;
+  if (!span) out = { ...base, returnTrip };
+  else {
+    const plan = clipPlan(base.plan, span.start);
+    out = { ...base, plan, returnTrip, handoffAt: plan === base.plan ? undefined : span.start };
+  }
+  if (!byTrip) tripPlanCache.set(base, (byTrip = new WeakMap()));
+  byTrip.set(returnTrip, { r, out });
+  return out;
 }
+
+const dayStartCache = new Map<string, number | null>();
 
 /** UTC midnight-to-midnight bounds of a local date in a zone (01:00 if midnight does not exist). */
 export function localDayStart(date: string, tz: string): number | null {
+  const key = `${date}|${tz}`;
+  const hit = dayStartCache.get(key);
+  if (hit !== undefined) return hit;
   const a = localToUtc(date, '00:00', tz);
-  if (a.ok) return a.ms;
-  const b = localToUtc(date, '01:00', tz);
-  return b.ok ? b.ms : null;
+  const b = a.ok ? a : localToUtc(date, '01:00', tz);
+  const ms = b.ok ? b.ms : null;
+  if (dayStartCache.size > 5000) dayStartCache.clear();
+  dayStartCache.set(key, ms);
+  return ms;
 }
 
 export interface DayRange {
@@ -157,7 +192,15 @@ export interface Strip {
  * The 24-hour strips that show a day: its own local date, plus, for a travel day that runs past
  * that date, the arrival date on the destination clock.
  */
-export function dayStrips(plan: Plan, i: number): Strip[] {
+export function dayStrips(plan: Plan, i: number): readonly Strip[] {
+  let perPlan = stripsCache.get(plan);
+  if (!perPlan) stripsCache.set(plan, (perPlan = []));
+  return (perPlan[i] ??= computeDayStrips(plan, i));
+}
+
+const stripsCache = new WeakMap<Plan, (readonly Strip[])[]>();
+
+function computeDayStrips(plan: Plan, i: number): Strip[] {
   const d = plan.days[i];
   const range = dayRange(plan, i);
   if (!d || !range) return [];

@@ -389,7 +389,9 @@ function buildPlan(input):
         add sleep(w) if any
   // review fix: a destination night at body-clock midday right after a full night (LHR → LAX
   // 13:00–15:00Z, body clock ≈ 13:00) is not a sleep; the in-flight nap rule (§7.1) covers it.
-  // night ends are wall-clock: a 23:00–07:00 night ends at 07:00 local even on a DST night
+  // night ends are wall-clock: a 23:00–07:00 night ends at 07:00 local even on a DST night. A bedtime
+  // inside a spring-forward gap (02:30 on the US change night) starts at the later valid instant
+  // (03:30) and still ends at the usual wake time (fuzz fix BUG-3: it used to end an hour late)
   // destination nights: habitual B/W on destination clock (DESIGN CHOICE: adopt local schedule on arrival)
   for each destination night N from the night containing/after arrival until the last event + 1 day:
      w = N ∩ [arrive + h(1), ∞)
@@ -403,6 +405,17 @@ function buildPlan(input):
   // (v0 applied the cap only to legs with no in-flight sleep at all, so CDG → SYD was told to stay
   // awake 28 h, through its whole body-clock night on the plane, before a late in-flight sleep.)
   // the night before departure when nPre==0 is not shown
+  // awake-span safety cap (extension, fuzz fix BUG-1): while two consecutive sleeps (in time order,
+  // any kind) leave more than h(MAX_AWAKE_HARD_H = 30) awake, add one sleep in that span [a, b):
+  //    candidates: pieces of [dep + 1h, arr − 1h] on legs ≥ 4 h ('sleep on the plane'), or ground time
+  //    outside every [dep − 2h, arr + 1h] ('recovery' sleep, its own rationale), clipped to
+  //    [a + h(4), b − h(4)], each of length min(h(D), piece) and at least 1.5 h (flight) / 2 h (ground),
+  //    starts on a 15-min grid
+  //    pick: leaves no span over h(MAX_AWAKE_H = 20) if possible; then most overlap with the body-clock
+  //    night (bodyNight(t, 0)); then the shortest longest remaining span; then in flight; then earliest
+  // (A 9 h overnight Kolkata → Eucla flight after three pre-adapted nights used to leave 39.8 h awake:
+  // the flight missed the destination night and had only 1.48 h of body-clock night. 3% of fuzz inputs
+  // had a span over 30 h; realistic single-leg routes never trigger the cap.)
 
   awake = complement of sleeps over [planStart, planEnd]
 
@@ -462,11 +475,13 @@ function buildPlan(input):
 
   // ---------- 11. Bucket into days ----------
   day k<0 : [local(origin, depDate+k, 0), local(origin, depDate+k+1, 0)), tz=origin, date=depDate+k
-  F = arrDate > depDate + 1 ? arrDate : arrDate + 1           // first post-travel date
+  F = arrDate > depDate + 1 ? arrDate : max(arrDate, depDate) + 1   // first post-travel date
   day 0   : [local(origin, depDate, 0),   max(local(dest, F, 0), depart)), tz=origin, date=depDate
   day k≥1 : [end of day k−1,               local(dest, F+k, 0)),           tz=dest,   date=F+k−1
   // so a date-line arrival two dates later (LAX→SYD) gets its own day 1; the app shows a
-  // date chip for any window whose local date differs from the day's date (formatWindowLocal.localDate)
+  // date chip for any window whose local date differs from the day's date (formatWindowLocal.localDate).
+  // An arrival date *before* the departure date (HND 00:05 → LAX 17:10 the previous day) is part of
+  // day 0, and day 1 is the date after the departure date, so no two days share a date (fuzz fix BUG-2).
   Assign each window to the day whose interval contains its startUtc, except: a ground sleep starting
      between 00:00 and 12:00 local belongs to the night of the previous date, so it is bucketed 12 h earlier
      (when that stays on the same side of the journey and inside the plan), together with the ground windows
@@ -479,7 +494,10 @@ function buildPlan(input):
   day.remainingShiftHours = round1(remaining of the last event with t ≤ the day's usual wake time
                                    (local(day.tz, date, W), clamped into the day); if none, planned)
   Emit days from −nPre through the last day containing a window or an event with |remaining| > ADAPTED_TOL.
-  Drop empty days except day 0.
+  With stayDays, keep emitting days (before the stay cut-off) until one shows |remaining| ≤ ADAPTED_TOL
+  or the stay's last date is reached (fuzz fix BUG-4: the cut-off used to drop the last date, so the
+  plan ended showing shift still to go).
+  Drop empty days except day 0 and, with stayDays, the days after the last day with windows.
 
   return {strategy, zoneDeltaHours: delta, plannedShiftHours: planned,
           estimatedDaysToAdapt, days, warnings}
@@ -492,6 +510,7 @@ strategy = 'stay_on_home_time'; plannedShiftHours = 0; estimatedDaysToAdapt = 0
 warnings += "Short stay: keeping close to home time is usually easier than adapting and re-adapting."
 For each day from day 0 to ceil(stayDays):
   sleep  = habitual B/W in origin clock (converted to UTC); tz label = where the traveller is
+           (plus the awake-span safety cap of §11 step 6, with the home nights as body-clock nights)
   t      = home Tmin for that date (origin clock; does not move)
   avoid_light = [t − 4h, t + 4h) ∩ awake        // keep light away from both sides of Tmin so the clock stays put
   caffeine rules as in §6 against home-time sleep
@@ -563,6 +582,7 @@ If home-time sleep overlaps fixed commitments the user must manage that; no nap 
 | FLIGHT_SLEEP_BODY_MARGIN_H | 2 h either side of the body-clock night | DESIGN CHOICE |
 | FLIGHT_SLEEP_PRESSURE_H | 8 h awake makes in-flight sleep realistic at any body-clock time | DESIGN CHOICE |
 | MAX_AWAKE_H | 20 h before the awake-cap body-night sleep is added | DESIGN CHOICE |
+| MAX_AWAKE_HARD_H | 30 h: no awake span between planned sleeps is longer (safety cap) | DESIGN CHOICE |
 | DAYLIGHT_CORE_HOURS / DAYLIGHT_HOURS | 08:00–16:30 / 06:30–19:30 local, wording only | DESIGN CHOICE (no solar model) |
 
 All parameters should live in one exported `PARAMS` object so they can be tuned and tested.
@@ -612,7 +632,11 @@ Default profile unless stated: bed 23:00, wake 07:00, intermediate. Therefore ho
 - `estimatedDaysToAdapt ≤ MAX_POST_DAYS`; it is 0 for `none` and `stay_on_home_time`.
 - Strategy is independent of `useMelatonin` and `useCaffeine`.
 - Melatonin only appears when `useMelatonin` is true and strategy is `advance`. No caffeine windows when `useCaffeine` is false.
-- Days are ordered by dayIndex, with no gaps between the first and last emitted day except dropped empty days.
+- Days are ordered by dayIndex, with no gaps between the first and last emitted day except dropped empty days. Every day has its own date, later than the day before.
+- No awake span between two consecutive sleeps exceeds `MAX_AWAKE_HARD_H` (30 h).
+- A destination night (not a recovery sleep) ends at the usual wake time on the local clock, DST nights included.
+- An adaptive plan ends adapted, at the horizon (with its warning), or on the stay's last date.
+- Property-based fuzz suite (`engine/test/fuzz.test.ts`, fast-check, fixed seed): 2000 random itineraries per property over 38 real zones (half/quarter-hour offsets, ±12–14, DST in both hemispheres), 1–4 legs, random sleep habits, preferences, stays and starting offsets, plus invalid-input, metamorphic (+7 days, melatonin and caffeine toggles, same-zone trips) and build-time (< 50 ms) checks.
 - Every boundary is on the 5-min grid (UTC and local). Same-kind windows with the same tz and rationale never touch.
 - Ground naps are 20 min; in-flight naps are 20–90 min, inside the flight, and never overlap `avoid_caffeine`. At most one nap per day (a multi-leg travel day: one in-flight nap per leg).
 - Over a grid of ~650 single-leg trips: no awake span over `MAX_AWAKE_H` leaves ≥ 1.5 h of in-flight body-clock night awake, and every awake span over 22 h within 48 h of arrival contains a nap.

@@ -1,3 +1,5 @@
+import type { StyleProp, TextStyle } from 'react-native';
+
 import { Field } from './ui';
 import type { DateTimeFieldProps } from './date-time-field';
 
@@ -5,7 +7,8 @@ import type { DateTimeFieldProps } from './date-time-field';
 export function DateTimeField({ mode, label, value, onChange, placeholder, style }: DateTimeFieldProps) {
   return (
     <Field
-      style={style}
+      // Field lays its container out with this style (see ui.tsx); its prop is typed for the input.
+      style={style as StyleProp<TextStyle>}
       label={label}
       value={value}
       onChangeText={onChange}

@@ -104,7 +104,14 @@ export function TripForm({ initial, editing, intro, meta, adjustInput, submitTit
       profileAtSave: profile,
     });
     setSaving(false);
-    router.replace({ pathname: '/trip/[id]', params: { id } });
+    if (editing) {
+      // Editing is opened from the trip's plan: go back to that screen (it re-renders from the
+      // store) instead of stacking a second copy of the plan over it, so Back leaves the plan.
+      // dismissTo replaces the form when the plan is not in the history (deep link to the form).
+      router.dismissTo({ pathname: '/trip/[id]', params: { id } });
+    } else {
+      router.replace({ pathname: '/trip/[id]', params: { id } });
+    }
     if (Platform.OS !== 'web' && scheduled === 0) {
       // Non-blocking: explain once why no reminders were set.
       setTimeout(

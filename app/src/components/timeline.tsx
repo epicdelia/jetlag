@@ -1,7 +1,9 @@
 import { formatWindowLocal, type AdviceKind, type AdviceWindow, type DayPlan, type Plan } from '@jetlag/engine';
+import { memo, useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { AdviceLabels, AdviceOrder, Radius, Spacing } from '@/constants/theme';
+import { useNowIn, useNowWithin } from '@/hooks/use-now';
 import { usePalette } from '@/hooks/use-palette';
 import { allWindows, isPoint, type Strip } from '@/lib/plan';
 import { formatDateKey, formatDateLabel, formatTime, offsetMinutes, zoneAbbr } from '@/lib/tz';
@@ -27,6 +29,11 @@ export function dayTitle(d: DayPlan): string {
 
 const half = (h: number) => Math.round(Math.abs(h) * 2) / 2;
 
+/** An hour offset wrapped to [−12, 12): offsets a whole day apart are the same clock. */
+export function wrap12(h: number): number {
+  return ((((h + 12) % 24) + 24) % 24) - 12;
+}
+
 /**
  * Body-clock status for a day. `remainingShiftHours` is measured against destination time, so
  * it is converted to the clock where the traveller is (`localTz`, default the day's zone): on a
@@ -35,7 +42,9 @@ const half = (h: number) => Math.round(Math.abs(h) * 2) / 2;
 export function shiftStatus(day: DayPlan, destTz: string, destName?: string, localTz: string = day.tz): string {
   const mid = Date.parse(`${day.date}T12:00:00Z`);
   const destAhead = (offsetMinutes(mid, destTz) - offsetMinutes(mid, localTz)) / 60;
-  const vsLocal = day.remainingShiftHours - destAhead; // + = body clock behind local time
+  // + = body clock behind local time. Wrapped to [−12, 12): a delay plan for a trip 10h+ east
+  // starts ~24h "ahead" of local time, which is the same clock as in step.
+  const vsLocal = wrap12(day.remainingShiftHours - destAhead);
   const local = half(vsLocal);
   const head =
     local < 0.5
@@ -55,24 +64,36 @@ const LANES: { key: string; label: string; kinds: AdviceKind[] }[] = [
   { key: 'melatonin', label: 'Melatonin', kinds: ['melatonin'] },
 ];
 
+/** The red "now" line on a lane. Subscribes to the clock itself, so a tick re-renders only it. */
+function NowMarker({ start, end }: { start: number; end: number }) {
+  const { c } = usePalette();
+  const now = useNowIn(start, end);
+  if (now == null) return null;
+  return <View style={[s.now, { left: `${((now - start) / (end - start)) * 100}%`, backgroundColor: c.danger }]} />;
+}
+
 /**
  * 24-hour strip for one local date on one clock (`strip.tz`). Includes windows from
  * neighbouring days that overlap it (e.g. last night's sleep). `caption` names the date and
  * clock when a day needs more than one strip (travel day: departure date and arrival date).
+ * Shows a live "now" marker when now falls inside the strip.
  */
-export function DayStrip({ plan, strip, now, caption }: { plan: Plan; strip: Strip; now?: number; caption?: string }) {
+export const DayStrip = memo(function DayStrip({ plan, strip, caption }: { plan: Plan; strip: Strip; caption?: string }) {
   const { c, advice } = usePalette();
   const b = strip;
   const span = b.end - b.start;
-  const ws = allWindows(plan).filter((w) => {
-    const s = Date.parse(w.startUtc);
-    const e = Date.parse(w.endUtc);
-    return isPoint(w) ? s >= b.start && s < b.end : e > b.start && s < b.end;
-  });
+  const ws = useMemo(
+    () =>
+      allWindows(plan).filter((w) => {
+        const s = Date.parse(w.startUtc);
+        const e = Date.parse(w.endUtc);
+        return isPoint(w) ? s >= b.start && s < b.end : e > b.start && s < b.end;
+      }),
+    [plan, b.start, b.end],
+  );
   const lanes = LANES.filter((l) => ws.some((w) => l.kinds.includes(w.kind)));
   if (lanes.length === 0) return null;
   const pct = (ms: number) => `${(Math.min(Math.max(ms - b.start, 0), span) / span) * 100}%` as const;
-  const nowIn = now !== undefined && now >= b.start && now < b.end;
 
   return (
     <View
@@ -117,7 +138,7 @@ export function DayStrip({ plan, strip, now, caption }: { plan: Plan; strip: Str
                   />
                 );
               })}
-            {nowIn ? <View style={[s.now, { left: pct(now!), backgroundColor: c.danger }]} /> : null}
+            <NowMarker start={b.start} end={b.end} />
           </View>
         </View>
       ))}
@@ -133,18 +154,28 @@ export function DayStrip({ plan, strip, now, caption }: { plan: Plan; strip: Str
       </View>
     </View>
   );
-}
+});
 
 /**
  * One advice window. Pass `dayDate` (the day's own date) inside a day card: when the window
  * starts on a different local date (travel day across a flight or the date line), the row
  * shows that date so nobody reads a Singapore-morning window as a London-evening one.
  */
-export function WindowRow({ w, active, dayDate }: { w: AdviceWindow; active?: boolean; dayDate?: string }) {
+export const WindowRow = memo(function WindowRow({
+  w,
+  active,
+  dayDate,
+}: {
+  w: AdviceWindow;
+  active?: boolean;
+  dayDate?: string;
+}) {
   const { c, advice } = usePalette();
-  const localDate = formatWindowLocal(w).localDate;
-  const dateChip = dayDate && localDate !== dayDate ? formatDateLabel(localDate) : null;
-  const time = dateChip ? `${dateChip}, ${formatWindowTime(w)}` : formatWindowTime(w);
+  const time = useMemo(() => {
+    const localDate = formatWindowLocal(w).localDate;
+    const dateChip = dayDate && localDate !== dayDate ? formatDateLabel(localDate) : null;
+    return dateChip ? `${dateChip}, ${formatWindowTime(w)}` : formatWindowTime(w);
+  }, [w, dayDate]);
   return (
     <View
       style={[s.windowRow, active && { backgroundColor: c.surfaceAlt, borderRadius: Radius.md }]}
@@ -164,6 +195,12 @@ export function WindowRow({ w, active, dayDate }: { w: AdviceWindow; active?: bo
       </View>
     </View>
   );
+});
+
+/** A WindowRow highlighted while now is inside the window; only a flip re-renders it. */
+export function LiveWindowRow({ w, dayDate }: { w: AdviceWindow; dayDate?: string }) {
+  const active = useNowWithin(Date.parse(w.startUtc), Date.parse(w.endUtc));
+  return <WindowRow w={w} active={active} dayDate={dayDate} />;
 }
 
 export function Legend({ kinds }: { kinds: AdviceKind[] }) {

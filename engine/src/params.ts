@@ -126,6 +126,16 @@ export const PARAMS = {
    */
   MAX_AWAKE_H: 20,
   /**
+   * Hard cap on time awake between two planned sleeps (safety). When the sleep rules above leave
+   * a longer awake span (an overnight flight that misses both the destination night and enough
+   * of the body-clock night, a long layover, a late departure after a shifted pre-flight night),
+   * one extra sleep is placed in it: on a long enough flight or on the ground away from the
+   * airport, preferring the body-clock night and keeping every remaining span ≤ MAX_AWAKE_H when
+   * possible. The extra sleep keeps FLIGHT_SLEEP_AFTER_WAKE_H clear of the sleeps on either side
+   * (DESIGN CHOICE; extension to SCIENCE.md §11 step 6).
+   */
+  MAX_AWAKE_HARD_H: 30,
+  /**
    * In-flight nap on a long travel day (SCIENCE.md §7.1): when no in-flight sleep is placed on a
    * leg and the traveller would be awake at least this long from the last sleep before the leg
    * to the first sleep after it (DESIGN CHOICE).

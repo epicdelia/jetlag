@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildPlan, PARAMS, type Plan, type TripInput, type AdviceWindow } from '../src';
 import { buildPlanDetailed } from '../src/plan';
+import { RATIONALE } from '../src/rationale';
 import { formatWindowLocal } from '../src/format';
 import { HOUR, offsetMinutes } from '../src/time';
 import { trip, leg, ms, allWindows, windowsOf, overlaps, inside } from './helpers';
@@ -228,7 +229,9 @@ function checkPlan(plan: Plan, input: TripInput) {
     if (!onGround) continue;
     const h = Number(formatWindowLocal(s).startLocal.slice(0, 2));
     const homeTime = plan.strategy === 'stay_on_home_time' && st >= lastArr;
-    if (!homeTime) expect(h >= 17 || h < 9, `bedtime ${formatWindowLocal(s).startLocal} in ${s.tz}`).toBe(true);
+    // A recovery sleep (awake-span safety cap, PARAMS.MAX_AWAKE_HARD_H) may fall at any hour.
+    const recovery = s.rationale === RATIONALE.sleepRecovery;
+    if (!homeTime && !recovery) expect(h >= 17 || h < 9, `bedtime ${formatWindowLocal(s).startLocal} in ${s.tz}`).toBe(true);
   }
 
   // sorting and day structure
@@ -236,7 +239,12 @@ function checkPlan(plan: Plan, input: TripInput) {
   for (let i = 1; i < idx.length; i++) expect(idx[i]!).toBeGreaterThan(idx[i - 1]!);
   const starts = ws.map((w) => ms(w.startUtc));
   for (let i = 1; i < starts.length; i++) expect(starts[i]!).toBeGreaterThanOrEqual(starts[i - 1]!);
-  for (const d of plan.days) if (d.dayIndex !== 0) expect(d.windows.length).toBeGreaterThan(0);
+  // Only day 0 and, with a known stay, the tail of the plan (kept to show the remaining shift on
+  // the stay's last dates) may be empty.
+  const lastFull = Math.max(...plan.days.filter((d) => d.windows.length > 0).map((d) => d.dayIndex), 0);
+  for (const d of plan.days) {
+    if (d.dayIndex !== 0 && !(input.stayDays !== undefined && d.dayIndex > lastFull)) expect(d.windows.length).toBeGreaterThan(0);
+  }
 
   // remaining shift: |rem| non-increasing; sign matches plan until adapted; ends adapted
   if (plan.strategy === 'advance' || plan.strategy === 'delay') {

@@ -1,5 +1,5 @@
 import type { AdviceWindow, Plan } from '@jetlag/engine';
-import { router } from 'expo-router';
+import { router, useIsFocused } from 'expo-router';
 import { View } from 'react-native';
 
 import { DayStrip, WindowRow, dayTitle, shiftStatus } from '@/components/timeline';
@@ -53,7 +53,8 @@ function destName(trip: Trip): string | undefined {
 
 export default function Today() {
   const { trips } = useAppStore();
-  const now = useNow();
+  // Hidden under another screen (e.g. a plan), Today stops re-rendering every tick.
+  const now = useNow(useIsFocused());
   const focus = pickFocus(trips, now);
 
   if (!focus) {
@@ -137,7 +138,7 @@ export default function Today() {
       {today && strip ? (
         <Card style={{ gap: Spacing.md }}>
           <T variant="label">Today at a glance</T>
-          <DayStrip plan={plan} strip={strip} now={now} />
+          <DayStrip plan={plan} strip={strip} />
           <T variant="small" muted>
             {shiftStatus(today, destTz, destName(trip), strip.tz)}.
           </T>

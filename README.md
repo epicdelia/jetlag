@@ -19,11 +19,13 @@ engine/   Pure TypeScript circadian engine. No runtime dependencies. Tested with
   src/rationale.ts  The plain-language sentences and warnings.
   test/             Scenario tests (SCIENCE.md §13), property invariants over about 410 itineraries,
                     edge cases and review regressions (round3.test.ts: awake spans, return-trip
-                    overlap, arrival day, stay cut-off, nap timing, daylight wording, bucketing).
+                    overlap, arrival day, stay cut-off, nap timing, daylight wording, bucketing),
+                    and a property-based fuzz suite (fuzz.test.ts, fuzz-lib.ts).
 app/      Expo (SDK 57) React Native app. Expo Router, iOS-first, also runs on the web for testing.
   src/app/          Screens: onboarding, Today, Trips, Settings, New/Edit/Return trip, Plan, About.
   src/lib/          Trip form → engine input (local wall-clock → UTC), storage, local notifications.
   scripts/          generate-icons.mjs (app icon, adaptive icon, splash, favicon from SVG).
+  e2e/              Playwright end-to-end suite (web build) and perf/plan-open.perf.mjs.
   eas.json          EAS Build profiles (development, preview, production).
 docs/     SCIENCE.md (the model spec with citations, parameters, tests and limitations), screenshots.
 ```
@@ -33,8 +35,8 @@ docs/     SCIENCE.md (the model spec with citations, parameters, tests and limit
 1. **Phase estimate.** The engine estimates core body temperature minimum (Tmin) from usual bed and wake times plus chronotype. DLMO is taken as about 7 h before Tmin.
 2. **Strategy.** The engine works out the zone difference at arrival and chooses one of four strategies: advance (east), delay (west, or 10 h or more east, which is antidromic), stay on home time (stays of 2 days or less), or no plan (under 2 h).
 3. **Simulation.** Tmin is iterated in UTC with capped per-day rates, each taken from published data. Shifting starts up to 3 days before departure. The target is the habitual Tmin on the destination's *local* clock, so a DST change at the destination moves it.
-4. **Windows.** Light windows sit on the correct side of the light phase-response curve, with a 1 h safety margin around Tmin. Sleep follows the pre-flight shift, then destination nights, and in-flight sleep when it is realistic: near the body-clock night, or after 8 h or more awake, never within 4 h of waking. A long leg that would leave the traveller awake more than 20 h gets in-flight sleep in the body-clock night, even when a destination-night sleep comes later in the flight. Naps (including an in-flight nap when a travel day would otherwise mean 18 h or more awake), caffeine and melatonin are added under conservative rules. Ground naps sit in the body-clock afternoon, never near Tmin.
-5. **Output.** Times are rounded to 5 minutes, touching windows with the same advice are merged, and windows are assigned to days (a sleep that starts after midnight is listed under the evening it belongs to). With a known stay, nothing is planned after the date the stay ends. Every window carries the IANA zone the traveller is in at that moment, and the app displays it in that zone. Light wording only promises daylight inside 08:00–16:30 local and never suggests sunglasses in the dark.
+4. **Windows.** Light windows sit on the correct side of the light phase-response curve, with a 1 h safety margin around Tmin. Sleep follows the pre-flight shift, then destination nights, and in-flight sleep when it is realistic: near the body-clock night, or after 8 h or more awake, never within 4 h of waking. A long leg that would leave the traveller awake more than 20 h gets in-flight sleep in the body-clock night, even when a destination-night sleep comes later in the flight. As a safety cap, no plan leaves more than 30 h awake between two sleeps: if the rules above would, one extra sleep is added on the flight or on the ground away from the airport ("recovery" sleep), preferring the body-clock night. Naps (including an in-flight nap when a travel day would otherwise mean 18 h or more awake), caffeine and melatonin are added under conservative rules. Ground naps sit in the body-clock afternoon, never near Tmin.
+5. **Output.** Times are rounded to 5 minutes, touching windows with the same advice are merged, and windows are assigned to days (a sleep that starts after midnight is listed under the evening it belongs to). Every day has its own, later date, also when a flight lands on the date before it left (westward over the date line). With a known stay, nothing is planned after the date the stay ends, but the plan still shows the days up to the stay's last date until the model is adapted. Every window carries the IANA zone the traveller is in at that moment, and the app displays it in that zone. Light wording only promises daylight inside 08:00–16:30 local and never suggests sunglasses in the dark.
 
 Return trips: `buildReturnInput(outbound, returnLegs)` builds the journey home and sets the optional `TripInput.startingBodyClockOffsetHours` when the stay was too short to adapt fully (SCIENCE.md §8.1). `returnStart` (used by the app) also caps the return's pre-flight days so they never overlap the outbound plan: none while the outbound plan is still adapting the traveller, otherwise only the days after it has finished.
 
@@ -63,10 +65,27 @@ npx expo start      # dev server; press i for the iOS simulator, w for web
 ```
 
 - **Web (for testing):** `npx expo start --web`, or build a static bundle with `npx expo export --platform web` (output in `app/dist`). Serve `app/dist` with any static server that falls back to `index.html` for unknown paths (the app's own not-found screen handles bad links). Reminders are disabled on the web, and dates and times are typed (`YYYY-MM-DD`, `HH:mm`) instead of using the native pickers.
-- **Browser QA:** the end-to-end checks drive that static build with Playwright and Chromium (390×844, `America/Toronto`, light and dark, with `page.clock` to move "now" through a trip). Screenshots from the last run are in `docs/screenshots` (`v1-*`, `v1-dark-*`).
 - The app imports the engine from source (`@jetlag/engine` → `../engine/src`). There is no separate build step.
 - Dependencies: the sandbox proxy blocks Expo's API, so `npx expo install` can fail. Take the SDK-57 version of a native module from `app/node_modules/expo/bundledNativeModules.json` and `npm install <pkg>@<version>` instead.
-- CI (`.github/workflows/ci.yml`) runs on Node 22: `npm ci` in both packages, engine tests and type check, app type check and a web export.
+- CI (`.github/workflows/ci.yml`) runs on Node 22: `npm ci` in both packages, engine tests and type check, app type check and a web export, then (separate `e2e` job) the Playwright suite against that export.
+
+### Testing
+
+Run everything from the package folder named in each step. CI (`.github/workflows/ci.yml`) runs the engine tests, both type checks, the web export and the end-to-end suite.
+
+| What | Command | Time |
+|---|---|---|
+| Engine unit, scenario, invariant and fuzz tests | `cd engine && npx vitest run` | ~20 s |
+| Engine type check | `cd engine && npx tsc --noEmit` | ~5 s |
+| App type check (includes the e2e files) | `cd app && npx tsc --noEmit` | ~10 s |
+| Web build used by e2e and perf | `cd app && npx expo export --platform web` | ~1 min cold |
+| End-to-end suite | `cd app && npm run test:e2e` (after the export) | ~30 s |
+| Performance check | `cd app && node e2e/perf/plan-open.perf.mjs --target prod` (after the export) | ~2 min |
+
+- **Unit and scenario tests** (`engine/test/*.test.ts`): the SCIENCE.md §13 scenarios, invariants over about 410 itineraries, edge cases, time-zone arithmetic and review regressions. `npx vitest run test/round3.test.ts` runs one file; `-t "<name>"` runs matching tests.
+- **Fuzz tests** (`engine/test/fuzz.test.ts`, generators and checks in `fuzz-lib.ts`): property-based tests with [fast-check](https://fast-check.dev) and a fixed seed, so every run sees the same 2000 random itineraries per property (38 real zones including :30/:45 offsets, ±12–14 h and DST in both hemispheres; 1–4 legs; random sleep habits, preferences, stays and starting offsets). Checks: no throw, determinism, window shape, nothing inside a sleep, no contradictory advice, caffeine and light safety, sleep lengths, awake spans ≤ 30 h, increasing day dates, destination nights waking at the usual local time, convergence, invalid input, metamorphic checks (+7 days, melatonin and caffeine toggles, same-zone trips) and build time (< 50 ms per plan; median ≈ 1 ms). The `BUG-1`…`BUG-4` tests are regressions for engine bugs this suite found. When a property fails, fast-check prints the shrunk counterexample input; paste it into a test to debug. To explore more inputs, change `SEED` or `RUNS` locally.
+- **End-to-end tests** (`app/e2e/*.spec.ts`): a Playwright suite (`@playwright/test` pinned to 1.56.1, the Chromium in `/opt/pw-browsers`; never run `playwright install` in the sandbox) that serves `app/dist` itself and drives it at 390×844 in `America/Toronto`, light and dark, with a fixed clock (`page.clock`) so plan dates are deterministic. It covers onboarding, new trips (single and multi-leg, city search, manual zones, DST gaps, ordering errors), plan contents (including a date-line trip and an antidromic trip), Today at several times on a trip, edit (and Back after saving), return trips, settings, delete, About and bad links. Any console error fails the test, and there are no fixed sleeps. `npx playwright test e2e/plan.spec.ts` runs one file; `--repeat-each=3` checks for flakes; `CI=1` uses CI settings (2 workers, an HTML report, no reuse of a running server). Use `test.fail` only to document a known bug, and remove it with the fix. Screenshots from earlier manual QA are in `docs/screenshots` (`v1-*`, `v1-dark-*`).
+- **Performance check** (`app/e2e/perf/plan-open.perf.mjs`): seeds three trips and measures, under 4× CPU throttling (`--cpu 4`), tapping a trip until the plan shows (first card and whole screen), scroll frame times, the 30 s clock tick while idle on a plan, and going back. Run it against the production export (`--target prod`), or against a dev server with `--target dev --url http://localhost:8081` while `npx expo start --web --port 8081` runs (dev builds are several times slower). `--json out.json` saves the numbers; `--profile out.json` adds a CPU profile and its top functions. Other options are listed at the top of the file. Don't run it alongside another build or test run: the machine's CPU load skews the numbers.
 
 ### Run on an iPhone
 
@@ -160,7 +179,6 @@ Install the build from the link or QR code EAS prints, then run `npx expo start 
    - Widgets and Live Activities for "right now" advice.
    - Day-by-day editing around commitments ("I have a meeting at 9").
    - A sunrise and sunset model for daylight wording (needs a latitude per city), and localization.
-   - Move the e2e browser checks into the repo and CI.
 6. **Wedge options** (pick one to lead):
    - **Frequent flyers with chained trips.** Consultants, flight crew-adjacent roles, sales. This is the strongest pain point and the case Timeshifter handles least well (back-to-back legs, short stays). It needs return-trip and chained-trip modelling (item 3).
    - **Wearable-driven.** "Your Oura/Apple Watch already knows your body clock." Personalised phase from real sleep data with adherence feedback. This differentiates on accuracy and needs item 2 plus validation.

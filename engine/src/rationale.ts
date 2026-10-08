@@ -31,6 +31,7 @@ export const RATIONALE = {
   sleepDest: 'Sleeping now lines up with your plan for destination time.',
   sleepHome: 'Sleeping now lines up with your plan for home time.',
   sleepFlight: "Try to sleep on the plane now; an eye mask and earplugs help.",
+  sleepRecovery: "You'd otherwise be awake for more than a day; sleep now, even if it's an unusual time, so you stay safe and alert.",
   sleepPre: (hours: number, dir: number) =>
     `Going to bed ${formatHours(hours)} ${dir > 0 ? 'earlier' : 'later'} than usual starts moving your body clock toward destination time.`,
   sleepPreKeep: 'Keep your usual sleep times tonight so you get as much rest as possible before your flight.',

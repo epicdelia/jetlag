@@ -33,15 +33,23 @@ function partsFormatter(tz: string): Intl.DateTimeFormat {
   return f;
 }
 
-/** True when `tz` is an IANA zone this runtime knows. */
+const validZones = new Map<string, boolean>();
+
+/** True when `tz` is an IANA zone this runtime knows. Cached: building a formatter is slow. */
 export function isValidTimeZone(tz: string): boolean {
   if (!tz || typeof tz !== 'string') return false;
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(0);
-    return true;
-  } catch {
-    return false;
+  let ok = validZones.get(tz);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(0);
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    if (validZones.size > 1000) validZones.clear();
+    validZones.set(tz, ok);
   }
+  return ok;
 }
 
 /** Wall-clock parts of instant `ms` in zone `tz`. */

@@ -206,8 +206,11 @@ function dayIntervals(
   }
   // Day 0 runs to the end of the arrival date when the traveller lands on the departure date
   // or the next one. When the arrival date is two or more dates later (date line), day 0 ends
-  // at the start of the arrival date so that date becomes day 1 and keeps its own label.
-  const firstPostDate = arrDate > depDate + 1 ? arrDate : arrDate + 1;
+  // at the start of the arrival date so that date becomes day 1 and keeps its own label. When the
+  // arrival date is *before* the departure date (westward over the date line, e.g. HND 00:05 →
+  // LAX 17:10 the previous day), day 0 runs to the end of the departure date on the destination
+  // clock, so day 1 is the date after it and no two days share a date.
+  const firstPostDate = arrDate > depDate + 1 ? arrDate : Math.max(arrDate, depDate) + 1;
   const day0Start = localToUtc(j.origin, depDate, 0);
   out.push({
     index: 0,
@@ -395,6 +398,7 @@ function caffeineWindows(
 
 function sleepRationale(S: SleepBlock, dir: number, stay: boolean): string {
   if (S.kind === 'flight') return RATIONALE.sleepFlight;
+  if (S.kind === 'recovery') return RATIONALE.sleepRecovery;
   if (S.kind === 'pre') return S.shiftH ? RATIONALE.sleepPre(S.shiftH, dir) : RATIONALE.sleepPreKeep;
   return stay ? RATIONALE.sleepHome : RATIONALE.sleepDest;
 }
@@ -436,11 +440,13 @@ function assembleDays(
   windows: AdviceWindow[],
   remainingOf: (d: DayInterval) => number,
   bucket: (w: AdviceWindow) => number,
+  keepEmpty: (d: DayInterval) => boolean = () => false,
 ): DayPlan[] {
   const out: DayPlan[] = [];
   for (const d of days) {
     const ws = windowsInDay(windows, d, bucket).sort(compareWindows);
-    if (ws.length === 0 && d.index !== 0) continue; // drop empty days except day 0
+    // Drop empty days, except day 0 and a day the caller keeps (the day a stay's plan adapts on).
+    if (ws.length === 0 && d.index !== 0 && !keepEmpty(d)) continue;
     out.push({
       date: dayNumberToIso(d.dayNum),
       tz: d.tz,
@@ -734,6 +740,7 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     }
   }
   sleeps.sort((a, b) => a.start - b.start || a.end - b.end);
+  fillLongAwakeSpans(j, sleeps, planStart, n.durH, normalize(bodyTmins.map((t) => bodyNight(t, 0))));
 
   const planEnd = Math.max(localToUtc(j.dest, lastDate + 1, 0), ...sleeps.map((s) => s.end));
   const awake = subtract(
@@ -889,10 +896,14 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
   const windowEnd = Math.min(planEnd, stayCutoff);
   const windows = finalizeWindows(j, raw.filter((w) => w.start >= planStart && w.start < windowEnd));
   const bucket = makeBucket(j, windows, planStart);
+  // A day is shown while it has windows or the model is not yet adapted on it.
   let lastIndex = 0;
+  let lastWithWindows = 0;
   for (const d of days) {
+    const hasWindows = windowsInDay(windows, d, bucket).length > 0;
+    if (hasWindows) lastWithWindows = Math.max(lastWithWindows, d.index);
     const active =
-      windowsInDay(windows, d, bucket).length > 0 ||
+      hasWindows ||
       events.some(
         (e) => e.t >= d.start && e.t < d.end && e.t < stayCutoff && Math.abs(e.remaining) > PARAMS.ADAPTED_TOL,
       );
@@ -904,11 +915,24 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     const wake = localToUtc(d.tz, d.dayNum, n.wakeMin);
     return remainingAt(Math.min(Math.max(wake, d.start), d.end - MINUTE));
   };
+  // With a known stay, the stay cut-off can leave the last days without windows. Keep showing
+  // days (empty ones too) until one shows the model adapted, or the stay's last date is reached,
+  // so the plan never ends on "shift still to go" when the model adapts during the stay.
+  if (n.stayDays !== undefined) {
+    for (const d of days) {
+      if (d.index <= lastIndex) continue;
+      const prev = days.find((x) => x.index === lastIndex);
+      if (!prev || Math.abs(remainingOf(prev)) <= PARAMS.ADAPTED_TOL || d.start >= stayCutoff) break;
+      lastIndex = d.index;
+    }
+  }
   const planDays = assembleDays(
     days.filter((d) => d.index <= lastIndex),
     windows,
     remainingOf,
     bucket,
+    // Empty days after the last day with windows are kept only in the stay case above.
+    (d) => n.stayDays !== undefined && d.index > lastWithWindows,
   );
 
   return {
@@ -922,6 +946,89 @@ export function buildPlanDetailed(input: TripInput): { plan: Plan; debug: PlanDe
     },
     debug: { tminClockMinutes: tminMin, nPre, events, sleeps, planStart, planEnd },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Awake-span safety cap (PARAMS.MAX_AWAKE_HARD_H)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an extra sleep can go: on a leg long enough for in-flight sleep (away from takeoff and
+ * landing), or on the ground away from the airport (not between leaving for a flight and
+ * settling in after landing).
+ */
+function sleepOpportunities(j: Journey): { piece: Interval; kind: 'flight' | 'recovery'; minH: number }[] {
+  const out: { piece: Interval; kind: 'flight' | 'recovery'; minH: number }[] = [];
+  for (const l of j.legs) {
+    if (l.arr - l.dep < PARAMS.MIN_FLIGHT_SLEEP_H * HOUR) continue;
+    out.push({
+      piece: [l.dep + PARAMS.FLIGHT_SLEEP_BUFFER_H * HOUR, l.arr - PARAMS.FLIGHT_SLEEP_BUFFER_H * HOUR],
+      kind: 'flight',
+      minH: PARAMS.MIN_FLIGHT_SLEEP_WINDOW_H,
+    });
+  }
+  const transit = normalize(
+    j.legs.map((l): Interval => [l.dep - PARAMS.PRE_DEPARTURE_BUFFER_H * HOUR, l.arr + PARAMS.POST_ARRIVAL_BUFFER_H * HOUR]),
+  );
+  for (const piece of subtract([[-Infinity, Infinity]], transit)) {
+    out.push({ piece, kind: 'recovery', minH: PARAMS.MIN_GROUND_SLEEP_H });
+  }
+  return out;
+}
+
+/**
+ * Safety cap: while two consecutive sleeps leave more than MAX_AWAKE_HARD_H awake, add one sleep
+ * in that span (in place). Candidates start at least FLIGHT_SLEEP_AFTER_WAKE_H after waking, end
+ * at least as long before the next sleep and last up to the habitual sleep length. Preference: leaves no span over MAX_AWAKE_H; then most overlap with the body-clock
+ * night; then the shortest longest span; then in flight; then earliest.
+ */
+function fillLongAwakeSpans(j: Journey, sleeps: SleepBlock[], planStart: number, durH: number, bodyNights: Interval[]): void {
+  const opportunities = sleepOpportunities(j);
+  const step = 15 * MINUTE;
+  for (let guard = 0; guard < 8; guard++) {
+    let worst: [number, number] | null = null;
+    for (let i = 1; i < sleeps.length; i++) {
+      const a = Math.max(...sleeps.slice(0, i).map((S) => S.end));
+      const b = sleeps[i]!.start;
+      if (b <= planStart || b - a <= PARAMS.MAX_AWAKE_HARD_H * HOUR) continue;
+      if (!worst || b - a > worst[1] - worst[0]) worst = [a, b];
+    }
+    if (!worst) return;
+    const [a, b] = worst;
+    const lo = Math.max(planStart, a + PARAMS.FLIGHT_SLEEP_AFTER_WAKE_H * HOUR);
+    const hi = b - PARAMS.FLIGHT_SLEEP_AFTER_WAKE_H * HOUR;
+    type Cand = { s: number; e: number; kind: 'flight' | 'recovery'; ok: boolean; overlap: number; gap: number };
+    let best: Cand | null = null;
+    const better = (x: Cand, y: Cand | null): boolean => {
+      if (!y) return true;
+      if (x.ok !== y.ok) return x.ok;
+      if (x.ok && x.overlap !== y.overlap) return x.overlap > y.overlap;
+      if (x.gap !== y.gap) return x.gap < y.gap;
+      if (!x.ok && x.overlap !== y.overlap) return x.overlap > y.overlap;
+      if (x.kind !== y.kind) return x.kind === 'flight';
+      return x.s < y.s;
+    };
+    for (const o of opportunities) {
+      const p0 = Math.max(o.piece[0], lo);
+      const p1 = Math.min(o.piece[1], hi);
+      const len = Math.min(durH * HOUR, p1 - p0);
+      if (len < o.minH * HOUR) continue;
+      const starts: number[] = [];
+      for (let s = p0; s <= p1 - len; s += step) starts.push(s);
+      starts.push(p1 - len);
+      for (const s of starts) {
+        const e = s + len;
+        const gap = Math.max(s - a, b - e);
+        let overlap = 0;
+        for (const [x, y] of intersect([[s, e]], bodyNights)) overlap += y - x;
+        const c: Cand = { s, e, kind: o.kind, ok: gap <= PARAMS.MAX_AWAKE_H * HOUR, overlap, gap };
+        if (better(c, best)) best = c;
+      }
+    }
+    if (!best || best.gap >= b - a) return;
+    sleeps.push({ start: best.s, end: best.e, kind: best.kind });
+    sleeps.sort((x, y) => x.start - y.start || x.end - y.end);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -952,7 +1059,8 @@ function stayOnHomeTimePlan(
   ];
   const layovers = layoverSpans(j);
   const sleeps: SleepBlock[] = [];
-  for (const N of nights(j.origin, depDate - 2, localDayNumber(j.origin, planEnd) + 1, n.bedMin, n.durH)) {
+  const homeNights = nights(j.origin, depDate - 2, localDayNumber(j.origin, planEnd) + 1, n.bedMin, n.durH);
+  for (const N of homeNights) {
     const ground = [
       ...longEnough(subtract([N], [transit]), PARAMS.MIN_GROUND_SLEEP_H),
       ...longEnough(intersect([N], layovers), PARAMS.MIN_GROUND_SLEEP_H),
@@ -963,6 +1071,8 @@ function stayOnHomeTimePlan(
     }
   }
   sleeps.sort((a, b) => a.start - b.start || a.end - b.end);
+  // The body clock stays on home time, so the home nights are the body-clock nights.
+  fillLongAwakeSpans(j, sleeps, planStart, n.durH, homeNights);
   const awake = subtract(
     [[planStart, planEnd]],
     sleeps.map((s) => [s.start, s.end] as Interval),
