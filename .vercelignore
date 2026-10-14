@@ -1,0 +1,6 @@
+**/node_modules
+app/dist
+app/.expo
+app/playwright-report
+app/test-results
+docs/screenshots

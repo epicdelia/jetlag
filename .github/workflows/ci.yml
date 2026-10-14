@@ -1,5 +1,9 @@
 name: CI
 
+# check -> e2e (local export) -> deploy to Vercel -> e2e against the deployed URL.
+# Deploys only happen after every test passes. Pushes to main go to production;
+# same-repo pull requests get a preview deployment.
+
 on:
   push:
     branches: [main]
@@ -94,6 +98,126 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
+          path: |
+            app/playwright-report/
+            app/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  deploy:
+    needs: e2e
+    # Secrets are unavailable to fork PRs, so only deploy pushes and same-repo PRs.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_SCOPE: ${{ secrets.VERCEL_SCOPE }}
+      VERCEL_PROJECT: shift-jetlag
+      TARGET: ${{ github.event_name == 'push' && 'production' || 'preview' }}
+    steps:
+      - name: Check Vercel credentials
+        id: creds
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::warning title=Deploy skipped::Add a VERCEL_TOKEN repository secret to enable Vercel deploys."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ok == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.ok == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Vercel CLI
+        if: steps.creds.outputs.ok == 'true'
+        run: npm install --global vercel@64.0.2
+
+      - name: Link Vercel project
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          scope=()
+          if [ -n "$VERCEL_SCOPE" ]; then scope=(--scope "$VERCEL_SCOPE"); fi
+          # Creates the project on first run, links to it afterwards.
+          vercel link --yes --project "$VERCEL_PROJECT" --token "$VERCEL_TOKEN" "${scope[@]}"
+          vercel pull --yes --environment "$TARGET" --token "$VERCEL_TOKEN" "${scope[@]}"
+
+      - name: Build (vercel.json - static Expo web export)
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          prod=()
+          if [ "$TARGET" = production ]; then prod=(--prod); fi
+          vercel build "${prod[@]}" --token "$VERCEL_TOKEN"
+
+      - name: Deploy
+        id: deploy
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          prod=()
+          if [ "$TARGET" = production ]; then prod=(--prod); fi
+          scope=()
+          if [ -n "$VERCEL_SCOPE" ]; then scope=(--scope "$VERCEL_SCOPE"); fi
+          url=$(vercel deploy --prebuilt "${prod[@]}" --token "$VERCEL_TOKEN" "${scope[@]}")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "### Deployed ($TARGET): $url" >> "$GITHUB_STEP_SUMMARY"
+
+  e2e-deployed:
+    needs: deploy
+    if: needs.deploy.outputs.url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      E2E_BASE_URL: ${{ needs.deploy.outputs.url }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Install Chromium for Playwright
+        working-directory: app
+        run: npx playwright install --with-deps chromium
+
+      - name: Smoke check the deployment
+        run: |
+          headers=()
+          if [ -n "$VERCEL_AUTOMATION_BYPASS_SECRET" ]; then
+            headers=(-H "x-vercel-protection-bypass: $VERCEL_AUTOMATION_BYPASS_SECRET")
+          fi
+          for path in / /trips /some/deep/link; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "${headers[@]}" "$E2E_BASE_URL$path")
+            echo "$path -> $code"
+            [ "$code" = 200 ] || { echo "::error::$E2E_BASE_URL$path returned $code"; exit 1; }
+          done
+
+      - name: End-to-end tests against the deployment
+        working-directory: app
+        env:
+          CI: 1
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-deployed
           path: |
             app/playwright-report/
             app/test-results/

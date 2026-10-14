@@ -7,6 +7,13 @@ import { defineConfig } from '@playwright/test';
  * (see e2e/fixtures.ts), so dates and plan contents are deterministic.
  */
 const PORT = Number(process.env.E2E_PORT ?? 8099);
+/**
+ * Set E2E_BASE_URL to run the same suite against a deployed site (e.g. a Vercel
+ * deployment) instead of the local export; no local server is started then.
+ * VERCEL_AUTOMATION_BYPASS_SECRET lets the tests through Vercel Deployment Protection.
+ */
+const REMOTE = process.env.E2E_BASE_URL?.replace(/\/$/, '');
+const BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
 export default defineConfig({
   testDir: './e2e',
@@ -19,7 +26,10 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
-    baseURL: `http://127.0.0.1:${PORT}`,
+    baseURL: REMOTE ?? `http://127.0.0.1:${PORT}`,
+    extraHTTPHeaders: BYPASS
+      ? { 'x-vercel-protection-bypass': BYPASS, 'x-vercel-set-bypass-cookie': 'true' }
+      : undefined,
     viewport: { width: 390, height: 844 },
     deviceScaleFactor: 2,
     isMobile: true,
@@ -30,10 +40,12 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
-  webServer: {
-    command: `node e2e/serve.mjs ${PORT}`,
-    url: `http://127.0.0.1:${PORT}/`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  },
+  webServer: REMOTE
+    ? undefined
+    : {
+        command: `node e2e/serve.mjs ${PORT}`,
+        url: `http://127.0.0.1:${PORT}/`,
+        reuseExistingServer: !process.env.CI,
+        timeout: 30_000,
+      },
 });

@@ -139,6 +139,46 @@ Install the build from the link or QR code EAS prints, then run `npx expo start 
 - **Plan screen**: the travel day shows two strips when it runs past the departure date (departure date on the origin clock, arrival date on the destination clock). Plans with melatonin show the "talk to a clinician" note, as does Today.
 - **Settings**: sleep-time and preference edits are saved with Save or when you leave the screen. Out-of-range sleep times are discarded on leaving, so values passed while stepping through times never reach new trips.
 
+## Deploying the web app (Vercel)
+
+The web build is a static single-page app (`expo export --platform web`, output
+`single`), so Vercel serves it as static files with a catch-all rewrite to
+`index.html` — no server functions. `vercel.json` at the repo root holds the build
+config; the build runs from the root because the app bundles the engine from
+`../engine` source.
+
+Deploys are done by GitHub Actions (`.github/workflows/ci.yml`), never by hand:
+
+```
+check (engine unit + fuzz tests, type checks, web export)
+  └─ e2e (41 Playwright tests against the local export)
+       └─ deploy (vercel build + vercel deploy --prebuilt)
+            └─ e2e-deployed (HTTP smoke + the same 41 tests against the live URL)
+```
+
+A push to `main` deploys to production; a same-repo pull request gets a preview
+deployment. Nothing deploys unless every test above it passed.
+
+One-time setup (repository → Settings → Secrets and variables → Actions):
+
+| Secret | Required | What |
+|---|---|---|
+| `VERCEL_TOKEN` | yes | vercel.com → Account Settings → Tokens |
+| `VERCEL_SCOPE` | only for a Vercel team | the team slug |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | only if preview Deployment Protection is on | Project → Settings → Deployment Protection → Protection Bypass for Automation |
+
+The first deploy creates the Vercel project `shift-jetlag`. Without `VERCEL_TOKEN`
+the deploy job is skipped with a warning and CI stays green.
+
+Do **not** also connect the repo through Vercel's Git integration — that would
+deploy on every push without waiting for the tests.
+
+To run the e2e suite against any deployed URL locally:
+
+```sh
+cd app && E2E_BASE_URL=https://shift-jetlag.vercel.app npm run test:e2e
+```
+
 ## Honesty notes
 
 - **Not medical advice.** Shift gives general, behavioural guidance based on published circadian research: when to seek or avoid light, sleep timing and caffeine. It does not diagnose or treat anything. The app shows this note on onboarding, on Today, on every plan and in About. It also tells people never to drive or work drowsy because a plan says to stay awake.
